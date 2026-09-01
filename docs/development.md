@@ -107,13 +107,14 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 | Layer | Current command | What it proves |
 |---|---|---|
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
-| Cashu adapter | `pnpm --filter @cashmesh/cashu test` | NUT-18 mapping, raw bounds, keyset identity, official DLEQ vector, proof integrity, and exact input fees |
+| Cashu adapter | `pnpm --filter @cashmesh/cashu test` | NUT-18 mapping, keyset identity and bounded observation, official DLEQ vector, proof integrity, and exact input fees |
 | Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, runtime Cashu configuration, replay, envelope binding, privacy, and sanitized failures |
 | PostgreSQL invoice integration | `pnpm test:integration` | Migration, atomic request persistence, restart, concurrency, replay, corruption, ownership, and rollback behavior |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
 | NUT-18 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut18_interoperability` | Pinned CDK decodes the cashu-ts fixture with the intended fields |
 | Merchant browser | `pnpm test:e2e` | Responsive layout and invoice fixture interaction |
 | Cashu process integration | Not implemented | No running `cdk-mintd` or token issuance yet |
+| Cashu mint HTTP integration | Not implemented | Keyset network behavior is covered by mocked transport; no live mint is called |
 | Stellar fixture integration | `stellar_compatibility` Rust test | Pinned Horizon decoding, identity, finality, and restart rules |
 | Stellar live integration | Not implemented | No funded signing, submission, or live payment yet |
 

@@ -1,8 +1,8 @@
 # Cashu Merchant Payment Requests
 
-**Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, and
-offline proof-integrity validation implemented; operator state checks and payment acceptance not
-implemented
+**Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, offline
+proof-integrity validation, and bounded public-key observation implemented; durable operator state and
+payment acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -131,6 +131,26 @@ not a freshness guarantee, and offline cryptography cannot establish NUT-07 `UNS
 endpoint therefore still returns `503`; a valid offline result must never be presented as a completed
 merchant payment.
 
+## Keyset Observation
+
+`CashuKeysetObserver` obtains one configured unit through a `CashuMintKeysetSource` port. The concrete
+HTTP client reads only `GET /v1/keysets` and `GET /v1/keys/{keyset_id}` beneath one normalized,
+server-configured HTTPS mint URL. Redirects, ambient credentials, referrer data, cache reuse, and
+authentication headers are disabled. Per-request time and decoded-body limits are hard bounded.
+
+The observer caps the metadata list before selecting the requested unit, then fetches at most 64
+matching keysets with four reads in flight. An ID repeated anywhere in the metadata response, including
+across units, is rejected. The observer reads metadata again after the keys arrive and rejects the whole
+result if an ID, activity flag, unit, input fee, or final expiry changed. Specific-key responses must
+contain exactly one matching keyset. The snapshot timestamp is taken only after that stable second read,
+and the existing snapshot validator recomputes every supported keyset ID.
+
+This is transport-authenticated observation of a configured host, not signed operator metadata. The
+client must never be constructed directly from the payer's mint field. It performs no automatic retry,
+persists no collision history, assigns no freshness lifetime, sends no NUT-21 or NUT-22 credential, and
+does not call NUT-07. A later store must reject an ID that conflicts with any historical observation,
+especially because a version `00` ID does not commit its unit, fee, or expiry.
+
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
 and support artifacts. Avoid putting customer identity or secrets into invoice identifiers or URLs.
@@ -146,9 +166,11 @@ This proves request encoding compatibility at the two library boundaries. The HT
 precision-preserving envelope parsing, stored-request binding, rejection behavior, and non-retention;
 they do not prove wallet QR scanning, proof validity, DLEQ verification, input-fee calculation,
 operator redemption, or merchant settlement. Separate proof tests cover an official NUT-12 vector,
-deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. They do
-not prove snapshot freshness, unspentness, redemption, or merchant settlement. Do not present a locally
-issued fixture request as payable.
+deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. Keyset
+observer tests cover stable two-pass metadata, unit filtering, concurrency, response bounds, transport
+timeouts, and failure paths entirely through local fixtures. They do not prove endpoint authenticity,
+snapshot freshness, historical collision safety, unspentness, redemption, or merchant settlement. Do
+not present a locally issued fixture request as payable.
 
 ## References
 
@@ -157,6 +179,8 @@ issued fixture request as payable.
 - [Cashu NUT-02 keysets and fees](https://github.com/cashubtc/nuts/blob/main/02.md)
 - [Cashu NUT-07 proof state](https://github.com/cashubtc/nuts/blob/main/07.md)
 - [Cashu NUT-12 DLEQ proofs](https://github.com/cashubtc/nuts/blob/main/12.md)
+- [Cashu NUT-21 clear authentication](https://github.com/cashubtc/nuts/blob/main/21.md)
+- [Cashu NUT-22 blind authentication](https://github.com/cashubtc/nuts/blob/main/22.md)
 - [Cashu NUT-26 payment-request encoding](https://github.com/cashubtc/nuts/blob/main/26.md)
 - [cashu-ts](https://github.com/cashubtc/cashu-ts)
 - [CDK `v0.18.0-rc.3`](https://github.com/cashubtc/cdk/releases/tag/v0.18.0-rc.3)

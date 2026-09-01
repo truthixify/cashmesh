@@ -1,4 +1,13 @@
 export {
+  CASHU_KEYSET_OBSERVATION_CONCURRENCY,
+  CashuKeysetObservationError,
+  type CashuKeysetObservationErrorCode,
+  CashuKeysetObserver,
+  type CashuKeysetObserverOptions,
+  MAX_CASHU_KEYSET_METADATA_ENTRIES,
+  type ObserveCashuKeysetsInput,
+} from "./keyset-observer";
+export {
   CASHU_KEYSET_SNAPSHOT_SCHEMA_VERSION,
   type CashuKeysetSnapshotEntryInputV1,
   type CashuKeysetSnapshotEntryV1,
@@ -10,6 +19,18 @@ export {
   MAX_CASHU_KEYS_PER_KEYSET,
   MAX_CASHU_KEYSETS_PER_SNAPSHOT,
 } from "./keyset-snapshot";
+export {
+  type CashuKeysetReadOptions,
+  CashuMintKeysetHttpClient,
+  type CashuMintKeysetHttpClientOptions,
+  CashuMintKeysetHttpError,
+  type CashuMintKeysetHttpErrorCode,
+  type CashuMintKeysetSource,
+  DEFAULT_CASHU_KEYSET_REQUEST_TIMEOUT_MS,
+  DEFAULT_CASHU_KEYSET_RESPONSE_BYTES,
+  MAX_CASHU_KEYSET_REQUEST_TIMEOUT_MS,
+  MAX_CASHU_KEYSET_RESPONSE_BYTES,
+} from "./mint-keyset-http-client";
 export {
   type CashuPaymentPayloadEnvelopeV1,
   CashuPaymentPayloadError,

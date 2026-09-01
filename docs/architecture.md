@@ -50,8 +50,11 @@ It may depend only on small, runtime-independent utilities with a demonstrated n
 `packages/cashu` maps a validated open invoice and accepted operator routes to a strict NUT-18
 request. It also inspects bounded raw payment payloads and returns only non-secret envelope metadata.
 It validates proof integrity and input fees against an explicit, versioned public-key snapshot without
-performing network I/O. It owns Cashu wire encoding, endpoint normalization, transport-size limits, and
-versioned policy records. It does not observe spent state or decide that an invoice has been paid.
+performing network I/O during proof validation. A separate source port and bounded HTTPS adapter can
+collect one unit's NUT-01 and NUT-02 data, reject a rotation between two metadata reads, and pass the
+joined result through the same snapshot validator. It owns Cashu wire encoding, endpoint normalization,
+transport-size limits, and versioned policy records. It does not persist snapshots, observe spent state,
+or decide that an invoice has been paid.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -114,6 +117,7 @@ acquirer-api ----------> Cashu request adapter
 acquirer-api ----------> PostgreSQL
 Cashu request adapter -> domain
 Cashu request adapter -> cashu-ts
+Cashu keyset client ---> configured operator HTTPS endpoint
 Cashu processor ------> stellar-settlement
 Horizon reader -------> stellar-settlement
 future payout signer --> stellar-settlement
@@ -210,3 +214,4 @@ justify it.
 - [ADR-0008: Persisted Cashu request snapshots](adr/0008-persist-cashu-request-snapshots.md)
 - [ADR-0009: Reject unverified Cashu payments](adr/0009-reject-unverified-cashu-payments.md)
 - [ADR-0010: Offline Cashu proof validation](adr/0010-validate-cashu-proofs-offline.md)
+- [ADR-0011: Bounded Cashu keyset observation](adr/0011-observe-cashu-keysets.md)
