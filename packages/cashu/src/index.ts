@@ -31,6 +31,7 @@ export {
   MAX_CASHU_KEYSET_REQUEST_TIMEOUT_MS,
   MAX_CASHU_KEYSET_RESPONSE_BYTES,
 } from "./mint-keyset-http-client";
+export { MAX_CASHU_ENDPOINT_LENGTH, normalizeCashuMintUrl } from "./mint-url";
 export {
   type CashuPaymentPayloadEnvelopeV1,
   CashuPaymentPayloadError,

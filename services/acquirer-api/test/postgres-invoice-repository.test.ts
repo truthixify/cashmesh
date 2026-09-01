@@ -1,4 +1,8 @@
-import { CashuPaymentRequestIssuer } from "@cashmesh/cashu";
+import {
+  type CashuKeysetSnapshotV1,
+  CashuPaymentRequestIssuer,
+  createCashuKeysetSnapshotV1,
+} from "@cashmesh/cashu";
 import {
   createInvoiceV1,
   idempotencyKey,
@@ -12,11 +16,24 @@ import { Pool } from "pg";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app";
+import {
+  CashuKeysetRepositoryError,
+  type PersistCashuKeysetObservation,
+} from "../src/cashu-keyset-repository";
 import { type CreateOpenInvoiceRecord, InvoiceRepositoryError } from "../src/invoice-repository";
+import { PostgresCashuKeysetRepository } from "../src/postgres-cashu-keyset-repository";
 import { PostgresInvoiceRepository } from "../src/postgres-invoice-repository";
 
 const DATABASE_URL = process.env.CASHMESH_TEST_DATABASE_URL;
-const repositories: PostgresInvoiceRepository[] = [];
+const repositories: Array<{ close(): Promise<void> }> = [];
+const KEYSET_MINT_URL = "https://mint-keys.cashmesh.example";
+const KEYSET_OBSERVED_AT = 1_788_100_000;
+const VERSION_ZERO_KEYSET_ID = "000f715baf5d4c2e";
+const VERSION_ZERO_PUBLIC_KEY =
+  "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const SECOND_VERSION_ZERO_KEYSET_ID = "00b1c9938f01121e";
+const SECOND_VERSION_ZERO_PUBLIC_KEY =
+  "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
 const CASHU_PAYMENT_REQUEST_ISSUER = new CashuPaymentRequestIssuer({
   operators: [
     {
@@ -33,7 +50,7 @@ const CASHU_PAYMENT_REQUEST_ISSUER = new CashuPaymentRequestIssuer({
   transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
 });
 
-describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () => {
+describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
   beforeAll(async () => {
     const repository = await PostgresInvoiceRepository.connect({
       connectionString: requireDatabaseUrl(),
@@ -45,7 +62,16 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
     const pool = new Pool({ connectionString: requireDatabaseUrl() });
     try {
       await pool.query(
-        "TRUNCATE invoice_cashu_request_operators, invoice_cashu_requests, invoice_creation_requests, merchant_invoices",
+        `
+          TRUNCATE
+            cashu_keyset_observation_entries,
+            cashu_keyset_observations,
+            cashu_keysets,
+            invoice_cashu_request_operators,
+            invoice_cashu_requests,
+            invoice_creation_requests,
+            merchant_invoices
+        `,
       );
     } finally {
       await pool.end();
@@ -360,6 +386,406 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
       await pool.end();
     }
   });
+
+  it("persists an exact Cashu keyset observation across repository restart", async () => {
+    const firstRepository = await connectKeysetRepository();
+    const input = keysetObservation();
+    const first = await firstRepository.persistObservation(input);
+    await closeRepository(firstRepository);
+
+    const restartedRepository = await connectKeysetRepository();
+    const found = await restartedRepository.findLatestFreshSnapshot({
+      mintUrl: KEYSET_MINT_URL,
+      observedAtOrAfter: unixTimestamp(KEYSET_OBSERVED_AT),
+      observedAtOrBefore: unixTimestamp(KEYSET_OBSERVED_AT),
+      operatorId: operatorId("operator-a"),
+      unit: "usdc",
+    });
+    const replay = await restartedRepository.persistObservation(input);
+
+    expect(first).toEqual({ replayed: false, snapshot: input.snapshot });
+    expect(found).toEqual(input.snapshot);
+    expect(replay).toEqual({ replayed: true, snapshot: input.snapshot });
+    expect(Object.isFrozen(found)).toBe(true);
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("allows later activity changes and returns the latest snapshot inside inclusive bounds", async () => {
+    const repository = await connectKeysetRepository();
+    const inactive = keysetObservation({ active: false });
+    const active = keysetObservation({ active: true, observedAt: KEYSET_OBSERVED_AT + 10 });
+    const future = keysetObservation({ active: false, observedAt: KEYSET_OBSERVED_AT + 20 });
+    await repository.persistObservation(inactive);
+    await repository.persistObservation(active);
+    await repository.persistObservation(future);
+
+    const latest = await repository.findLatestFreshSnapshot({
+      mintUrl: KEYSET_MINT_URL,
+      observedAtOrAfter: unixTimestamp(KEYSET_OBSERVED_AT),
+      observedAtOrBefore: unixTimestamp(KEYSET_OBSERVED_AT + 10),
+      operatorId: operatorId("operator-a"),
+      unit: "usdc",
+    });
+    const lowerBoundary = await repository.findLatestFreshSnapshot({
+      mintUrl: KEYSET_MINT_URL,
+      observedAtOrAfter: unixTimestamp(KEYSET_OBSERVED_AT),
+      observedAtOrBefore: unixTimestamp(KEYSET_OBSERVED_AT),
+      operatorId: operatorId("operator-a"),
+      unit: "usdc",
+    });
+    const gap = await repository.findLatestFreshSnapshot({
+      mintUrl: KEYSET_MINT_URL,
+      observedAtOrAfter: unixTimestamp(KEYSET_OBSERVED_AT + 1),
+      observedAtOrBefore: unixTimestamp(KEYSET_OBSERVED_AT + 9),
+      operatorId: operatorId("operator-a"),
+      unit: "usdc",
+    });
+
+    expect(latest?.observedAt).toBe(KEYSET_OBSERVED_AT + 10);
+    expect(latest?.keysets[0]?.active).toBe(true);
+    expect(lowerBoundary?.observedAt).toBe(KEYSET_OBSERVED_AT);
+    expect(lowerBoundary?.keysets[0]?.active).toBe(false);
+    expect(gap).toBeUndefined();
+    await expectKeysetRowCounts({ entries: 3, keysets: 1, observations: 3 });
+  });
+
+  it("scopes fresh keyset lookup by operator, mint, and unit", async () => {
+    const repository = await connectKeysetRepository();
+    await repository.persistObservation(keysetObservation());
+    const lookup = {
+      mintUrl: KEYSET_MINT_URL,
+      observedAtOrAfter: unixTimestamp(KEYSET_OBSERVED_AT),
+      observedAtOrBefore: unixTimestamp(KEYSET_OBSERVED_AT),
+      operatorId: operatorId("operator-a"),
+      unit: "usdc",
+    };
+
+    const wrongOperator = await repository.findLatestFreshSnapshot({
+      ...lookup,
+      operatorId: operatorId("operator-b"),
+    });
+    const wrongMint = await repository.findLatestFreshSnapshot({
+      ...lookup,
+      mintUrl: "https://another-mint.cashmesh.example",
+    });
+    const wrongUnit = await repository.findLatestFreshSnapshot({ ...lookup, unit: "sat" });
+
+    expect(wrongOperator).toBeUndefined();
+    expect(wrongMint).toBeUndefined();
+    expect(wrongUnit).toBeUndefined();
+  });
+
+  it("rejects a persisted snapshot containing more than one unit", async () => {
+    const repository = await connectKeysetRepository();
+    const snapshot = createCashuKeysetSnapshotV1({
+      keysets: [
+        {
+          active: true,
+          id: VERSION_ZERO_KEYSET_ID,
+          keys: { "1": VERSION_ZERO_PUBLIC_KEY },
+          unit: "usdc",
+        },
+        {
+          active: true,
+          id: SECOND_VERSION_ZERO_KEYSET_ID,
+          keys: { "1": SECOND_VERSION_ZERO_PUBLIC_KEY },
+          unit: "sat",
+        },
+      ],
+      mintUrl: KEYSET_MINT_URL,
+      observedAt: KEYSET_OBSERVED_AT,
+    });
+
+    const error = await errorFromAsync(() =>
+      repository.persistObservation({
+        operatorId: operatorId("operator-a"),
+        snapshot,
+        unit: "usdc",
+      }),
+    );
+
+    expect(error).toMatchObject({ code: "invalid_input" });
+    await expectKeysetRowCounts({ entries: 0, keysets: 0, observations: 0 });
+  });
+
+  it.each([
+    {
+      name: "input fee",
+      overrides: { inputFeePpk: 1 },
+    },
+    {
+      name: "unit",
+      overrides: { unit: "sat" },
+    },
+    {
+      name: "final expiry",
+      overrides: { finalExpiry: KEYSET_OBSERVED_AT + 1_000 },
+    },
+  ])("rejects historical version zero keyset reuse with a changed $name", async ({ overrides }) => {
+    const repository = await connectKeysetRepository();
+    await repository.persistObservation(keysetObservation());
+
+    const error = await errorFromAsync(() =>
+      repository.persistObservation(
+        keysetObservation({ ...overrides, observedAt: KEYSET_OBSERVED_AT + 1 }),
+      ),
+    );
+
+    expect(error).toBeInstanceOf(CashuKeysetRepositoryError);
+    expect(error).toMatchObject({ code: "keyset_collision" });
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("shares keyset collision history across operator identities", async () => {
+    const repository = await connectKeysetRepository();
+    await repository.persistObservation(keysetObservation({ operatorId: "operator-a" }));
+
+    const error = await errorFromAsync(() =>
+      repository.persistObservation(
+        keysetObservation({
+          inputFeePpk: 10,
+          observedAt: KEYSET_OBSERVED_AT + 1,
+          operatorId: "operator-b",
+        }),
+      ),
+    );
+
+    expect(error).toMatchObject({ code: "keyset_collision" });
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("rolls back new identities when a later keyset in the snapshot collides", async () => {
+    const repository = await connectKeysetRepository();
+    const existingSnapshot = createCashuKeysetSnapshotV1({
+      keysets: [
+        {
+          active: true,
+          id: SECOND_VERSION_ZERO_KEYSET_ID,
+          keys: { "1": SECOND_VERSION_ZERO_PUBLIC_KEY },
+          unit: "usdc",
+        },
+      ],
+      mintUrl: KEYSET_MINT_URL,
+      observedAt: KEYSET_OBSERVED_AT,
+    });
+    await repository.persistObservation({
+      operatorId: operatorId("operator-a"),
+      snapshot: existingSnapshot,
+      unit: "usdc",
+    });
+    const collidingSnapshot = createCashuKeysetSnapshotV1({
+      keysets: [
+        {
+          active: true,
+          id: VERSION_ZERO_KEYSET_ID,
+          keys: { "1": VERSION_ZERO_PUBLIC_KEY },
+          unit: "usdc",
+        },
+        {
+          active: true,
+          id: SECOND_VERSION_ZERO_KEYSET_ID,
+          inputFeePpk: 1,
+          keys: { "1": SECOND_VERSION_ZERO_PUBLIC_KEY },
+          unit: "usdc",
+        },
+      ],
+      mintUrl: KEYSET_MINT_URL,
+      observedAt: KEYSET_OBSERVED_AT + 1,
+    });
+
+    const error = await errorFromAsync(() =>
+      repository.persistObservation({
+        operatorId: operatorId("operator-a"),
+        snapshot: collidingSnapshot,
+        unit: "usdc",
+      }),
+    );
+
+    expect(error).toMatchObject({ code: "keyset_collision" });
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("keeps identical keyset identifiers at distinct mint URLs independent", async () => {
+    const repository = await connectKeysetRepository();
+    await repository.persistObservation(keysetObservation());
+    await repository.persistObservation(
+      keysetObservation({
+        inputFeePpk: 10,
+        mintUrl: "https://another-mint.cashmesh.example",
+        observedAt: KEYSET_OBSERVED_AT + 1,
+      }),
+    );
+
+    await expectKeysetRowCounts({ entries: 2, keysets: 2, observations: 2 });
+  });
+
+  it("rejects different activity at the same operator observation time", async () => {
+    const repository = await connectKeysetRepository();
+    await repository.persistObservation(keysetObservation({ active: true }));
+
+    const error = await errorFromAsync(() =>
+      repository.persistObservation(keysetObservation({ active: false })),
+    );
+
+    expect(error).toMatchObject({ code: "observation_conflict" });
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("converges concurrent exact observations on one durable record", async () => {
+    const firstRepository = await connectKeysetRepository();
+    const secondRepository = await connectKeysetRepository();
+    const input = keysetObservation();
+
+    const [first, second] = await Promise.all([
+      firstRepository.persistObservation(input),
+      secondRepository.persistObservation(input),
+    ]);
+
+    expect([first.replayed, second.replayed].sort()).toEqual([false, true]);
+    expect(first.snapshot).toEqual(second.snapshot);
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("serializes concurrent conflicting observations without retaining the loser", async () => {
+    const firstRepository = await connectKeysetRepository();
+    const secondRepository = await connectKeysetRepository();
+
+    const outcomes = await Promise.allSettled([
+      firstRepository.persistObservation(keysetObservation({ active: true })),
+      secondRepository.persistObservation(keysetObservation({ active: false })),
+    ]);
+    const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
+    const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: expect.objectContaining({ code: "observation_conflict" }),
+      status: "rejected",
+    });
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("fails closed when stored observation activity no longer matches its fingerprint", async () => {
+    const repository = await connectKeysetRepository();
+    await repository.persistObservation(keysetObservation({ active: true }));
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query(
+        "ALTER TABLE cashu_keyset_observation_entries DISABLE TRIGGER cashu_keyset_observation_entries_append_only",
+      );
+      try {
+        await pool.query("UPDATE cashu_keyset_observation_entries SET active = NOT active");
+      } finally {
+        await pool.query(
+          "ALTER TABLE cashu_keyset_observation_entries ENABLE TRIGGER cashu_keyset_observation_entries_append_only",
+        );
+      }
+    } finally {
+      await pool.end();
+    }
+
+    const error = await errorFromAsync(() =>
+      repository.findLatestFreshSnapshot({
+        mintUrl: KEYSET_MINT_URL,
+        observedAtOrAfter: unixTimestamp(KEYSET_OBSERVED_AT),
+        observedAtOrBefore: unixTimestamp(KEYSET_OBSERVED_AT),
+        operatorId: operatorId("operator-a"),
+        unit: "usdc",
+      }),
+    );
+
+    expect(error).toMatchObject({ code: "invalid_record" });
+  });
+
+  it("validates stored keyset material before accepting a new observation", async () => {
+    const repository = await connectKeysetRepository();
+    await repository.persistObservation(keysetObservation());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("ALTER TABLE cashu_keysets DISABLE TRIGGER cashu_keysets_append_only");
+      try {
+        await pool.query("UPDATE cashu_keysets SET input_fee_ppk = input_fee_ppk + 1");
+      } finally {
+        await pool.query("ALTER TABLE cashu_keysets ENABLE TRIGGER cashu_keysets_append_only");
+      }
+    } finally {
+      await pool.end();
+    }
+
+    const error = await errorFromAsync(() =>
+      repository.persistObservation(keysetObservation({ observedAt: KEYSET_OBSERVED_AT + 1 })),
+    );
+
+    expect(error).toMatchObject({ code: "invalid_record" });
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("rejects row-level mutation of durable Cashu keyset evidence", async () => {
+    const repository = await connectKeysetRepository();
+    await repository.persistObservation(keysetObservation());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      const mutations = [
+        "UPDATE cashu_keysets SET input_fee_ppk = input_fee_ppk + 1",
+        "UPDATE cashu_keyset_observations SET observed_at = observed_at + 1",
+        "DELETE FROM cashu_keyset_observation_entries",
+      ];
+      for (const mutation of mutations) {
+        const error = await errorFromAsync(() => pool.query(mutation));
+        expect(error).toMatchObject({ code: "55000" });
+      }
+    } finally {
+      await pool.end();
+    }
+
+    await expectKeysetRowCounts({ entries: 1, keysets: 1, observations: 1 });
+  });
+
+  it("rejects an inverted freshness interval before querying storage", async () => {
+    const repository = await connectKeysetRepository();
+
+    const error = await errorFromAsync(() =>
+      repository.findLatestFreshSnapshot({
+        mintUrl: KEYSET_MINT_URL,
+        observedAtOrAfter: unixTimestamp(KEYSET_OBSERVED_AT + 1),
+        observedAtOrBefore: unixTimestamp(KEYSET_OBSERVED_AT),
+        operatorId: operatorId("operator-a"),
+        unit: "usdc",
+      }),
+    );
+
+    expect(error).toMatchObject({ code: "invalid_input" });
+    await expectKeysetRowCounts({ entries: 0, keysets: 0, observations: 0 });
+  });
+
+  it("refuses to commit a Cashu keyset observation without entries", async () => {
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query(
+        `
+          INSERT INTO cashu_keyset_observations (
+            snapshot_fingerprint,
+            operator_id,
+            mint_url,
+            unit,
+            schema_version,
+            observed_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        ["a".repeat(64), "operator-a", KEYSET_MINT_URL, "usdc", 1, KEYSET_OBSERVED_AT],
+      );
+
+      const error = await errorFromAsync(() => pool.query("COMMIT"));
+
+      expect(error).toMatchObject({ code: "23514" });
+    } finally {
+      await pool.query("ROLLBACK");
+      await pool.end();
+    }
+  });
 });
 
 async function connectRepository(): Promise<PostgresInvoiceRepository> {
@@ -371,9 +797,56 @@ async function connectRepository(): Promise<PostgresInvoiceRepository> {
   return repository;
 }
 
-async function closeRepository(repository: PostgresInvoiceRepository): Promise<void> {
+async function connectKeysetRepository(): Promise<PostgresCashuKeysetRepository> {
+  const repository = await PostgresCashuKeysetRepository.connect({
+    connectionString: requireDatabaseUrl(),
+    maxConnections: 4,
+  });
+  repositories.push(repository);
+  return repository;
+}
+
+async function closeRepository(repository: { close(): Promise<void> }): Promise<void> {
   await repository.close();
   repositories.splice(repositories.indexOf(repository), 1);
+}
+
+interface KeysetObservationOverrides {
+  readonly active?: boolean;
+  readonly finalExpiry?: number;
+  readonly inputFeePpk?: number;
+  readonly mintUrl?: string;
+  readonly observedAt?: number;
+  readonly operatorId?: string;
+  readonly unit?: string;
+}
+
+function keysetObservation(
+  overrides: KeysetObservationOverrides = {},
+): PersistCashuKeysetObservation {
+  const unit = overrides.unit ?? "usdc";
+  return {
+    operatorId: operatorId(overrides.operatorId ?? "operator-a"),
+    snapshot: keysetSnapshot({ ...overrides, unit }),
+    unit,
+  };
+}
+
+function keysetSnapshot(overrides: KeysetObservationOverrides = {}): CashuKeysetSnapshotV1 {
+  return createCashuKeysetSnapshotV1({
+    keysets: [
+      {
+        active: overrides.active ?? true,
+        ...(overrides.finalExpiry !== undefined && { finalExpiry: overrides.finalExpiry }),
+        id: VERSION_ZERO_KEYSET_ID,
+        inputFeePpk: overrides.inputFeePpk ?? 0,
+        keys: { "1": VERSION_ZERO_PUBLIC_KEY },
+        unit: overrides.unit ?? "usdc",
+      },
+    ],
+    mintUrl: overrides.mintUrl ?? KEYSET_MINT_URL,
+    observedAt: overrides.observedAt ?? KEYSET_OBSERVED_AT,
+  });
 }
 
 function record(
@@ -442,6 +915,33 @@ async function expectRowCounts(expected: {
       cashu_requests: String(expected.invoices),
       creations: String(expected.creations),
       invoices: String(expected.invoices),
+    });
+  } finally {
+    await pool.end();
+  }
+}
+
+async function expectKeysetRowCounts(expected: {
+  readonly entries: number;
+  readonly keysets: number;
+  readonly observations: number;
+}): Promise<void> {
+  const pool = new Pool({ connectionString: requireDatabaseUrl() });
+  try {
+    const result = await pool.query<{
+      entries: string;
+      keysets: string;
+      observations: string;
+    }>(`
+      SELECT
+        (SELECT COUNT(*) FROM cashu_keysets) AS keysets,
+        (SELECT COUNT(*) FROM cashu_keyset_observations) AS observations,
+        (SELECT COUNT(*) FROM cashu_keyset_observation_entries) AS entries
+    `);
+    expect(result.rows[0]).toEqual({
+      entries: String(expected.entries),
+      keysets: String(expected.keysets),
+      observations: String(expected.observations),
     });
   } finally {
     await pool.end();

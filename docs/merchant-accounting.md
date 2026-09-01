@@ -118,7 +118,8 @@ payment, and journal identifiers are a required persistence invariant.
   persistence are not.
 - The invoice API attaches the strict NUT-18 request and inspects its payment envelope but never
   accepts the payment.
-- No proofs, DLEQ evidence, keysets, operator fee quotes, or spent state are validated.
+- Payment acceptance does not load stored keysets, validate bearer proofs or DLEQ evidence, obtain
+  operator fee quotes, or establish spent state.
 - The issued operator-policy snapshot is recorded; merchant-specific cap decisions and suspension
   state are not.
 - No conversion, redemption, payout, refund, reversal, or chargeback entry exists.

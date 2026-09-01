@@ -80,6 +80,7 @@ of Cashu or Stellar implementations.
 | Forged keyset, signature, or denomination | Crediting counterfeit operator liability | Recomputed keyset IDs, validated public points, strict DLEQ, and exact key lookup |
 | Oversized, redirected, or stalled keyset endpoint | Resource exhaustion or observation of the wrong host | Exact configured HTTPS paths, no redirects or credentials, response/time limits, and bounded concurrency |
 | Key rotation during observation | Inconsistent activity, fee, expiry, and public-key evidence | Two matching metadata reads around unit-scoped key collection |
+| Historical keyset ID reuse | Substituted keys, unit, fee, or expiry after prior acceptance | Cross-operator immutable identity fingerprints and append-only observations |
 | Duplicate proof inside one payload | Inflated gross amount | Reject duplicate secrets before amount or fee acceptance |
 | Dust proof fee exhaustion | Merchant receives less redeemable value than invoiced | Mixed-keyset NUT-02 fee calculation with integer round-up |
 | Stale or replayed NUT-18 request | Payment against an invalid invoice | Server-side invoice lookup, half-open expiry check, and unique payment reservation |
@@ -126,9 +127,10 @@ deployment gates, not optional hardening.
 
 ## Acquirer Database Boundary
 
-PostgreSQL now stores open invoices and idempotency fingerprints. Database constraints repeat the
-identifier, amount, unit, schema, ownership, and expiry-shape invariants. Concurrent creation is
-serialized by a unique merchant/key reservation, and invoice plus reservation commit together.
+PostgreSQL now stores open invoices, idempotency fingerprints, and public Cashu keyset evidence.
+Database constraints repeat identifier, amount, unit, schema, ownership, expiry-shape, and evidence
+cardinality invariants. Concurrent invoice creation is serialized by a unique merchant/key
+reservation, and invoice plus reservation commit together.
 
 The same transaction stores the strict Cashu request and one through 16 operator routes. Deferred
 constraints prevent a request with no accepted route. Reads reconstruct the request through the pinned
@@ -150,12 +152,13 @@ The Cashu adapter can validate standard `00` and `01` keysets, strict DLEQ evide
 fees from an explicit public snapshot. It accepts inactive keysets before final expiry but rejects
 deprecated base64 and experimental `02` keyset IDs. Its bounded client can observe public NUT-01/02
 data for one unit from a server-configured HTTPS host and rejects metadata that rotates during the
-read. HTTPS does not make the result a signed operator statement. Snapshots are not persisted or
-freshness-enforced, historical collisions are not detected, version `00` IDs do not commit fee
-metadata, and offline validation cannot establish NUT-07 state. NUT-21 and NUT-22 credentials are not
-handled. The adapter returns no bearer fields and is not connected to payment acceptance. A received
-NUT-12 blinding factor must never be logged, persisted outside encrypted proof custody, or forwarded to
-the mint, where it would reveal an issuance-to-spend link.
+read. HTTPS does not make the result a signed operator statement. A separate PostgreSQL repository
+stores append-only identities and observations, rejects historical version `00` unit, fee, or expiry
+changes across operators, and requires callers to provide inclusive freshness bounds. It has no
+automatic observer schedule and is not connected to payment acceptance. Offline validation cannot
+establish NUT-07 state, and NUT-21 and NUT-22 credentials are not handled. The adapter and keyset store
+return no bearer fields. A received NUT-12 blinding factor must never be logged, persisted outside
+encrypted proof custody, or forwarded to the mint, where it would reveal an issuance-to-spend link.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

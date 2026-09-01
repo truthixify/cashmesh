@@ -18,3 +18,4 @@ Current decisions:
 - [ADR-0009: Reject Unverified Cashu Payment Payloads](0009-reject-unverified-cashu-payments.md)
 - [ADR-0010: Validate Cashu Proofs Against Explicit Keyset Snapshots](0010-validate-cashu-proofs-offline.md)
 - [ADR-0011: Observe Cashu Keysets Through a Bounded Read Client](0011-observe-cashu-keysets.md)
+- [ADR-0012: Persist Cashu Keyset Identity and Observation Evidence](0012-persist-cashu-keyset-evidence.md)

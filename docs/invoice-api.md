@@ -174,7 +174,7 @@ official `postgres:18.6-alpine3.23` image pinned to manifest digest
 forward-only migrations under a PostgreSQL transaction-scoped advisory lock and refuses an unknown
 migration version or name.
 
-The invoice and Cashu request migrations enforce:
+The invoice, Cashu request, and keyset-evidence migrations enforce:
 
 - globally unique invoice identifiers;
 - one creation record per merchant/idempotency key and one key per invoice;
@@ -183,8 +183,14 @@ The invoice and Cashu request migrations enforce:
 - constrained invoice, merchant, and idempotency identifiers;
 - `open` as the only persistable state in the current schema;
 - one request per invoice, one through 16 ordered routes, unique operator and mint identities, strict
-  policy tuples, HTTPS endpoints, and a URL-safe `creqA` shape; and
-- reconstruction of stored request bytes through the pinned adapter before returning a record.
+  policy tuples, HTTPS endpoints, and a URL-safe `creqA` shape;
+- reconstruction of stored request bytes through the pinned adapter before returning a record;
+- one immutable identity per normalized mint URL and keyset ID, even across operator configurations;
+- one append-only observation per operator, mint, unit, and observation time; and
+- reconstruction and fingerprint verification before a keyset snapshot is returned as fresh.
+
+Keyset persistence is a separate repository capability. Invoice issuance and payment intake do not
+automatically observe a mint, select a freshness interval, or load a stored snapshot.
 
 The Cashu request migration refuses an invoice-only database that already contains invoice rows. A
 historical mint allowlist and transport cannot be inferred from an invoice, so deployment requires an

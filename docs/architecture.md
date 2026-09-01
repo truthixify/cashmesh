@@ -172,10 +172,12 @@ cursor, claim, prepared-envelope, and payout recovery across restart. It is not 
 or a multi-process coordination mechanism.
 
 PostgreSQL is selected for acquirer persistence. The implemented migrations store open invoice
-issuance, merchant-scoped idempotency, encoded Cashu requests, and normalized operator-policy routes.
-Database constraints require the reservation, invoice, request, and at least one accepted route to
-commit together. Stored requests are reconstructed through the pinned adapter before return. See the
-[merchant invoice API](invoice-api.md) for request and replay semantics.
+issuance, merchant-scoped idempotency, encoded Cashu requests, normalized operator-policy routes, and
+append-only Cashu keyset evidence. Database constraints require the reservation, invoice, request,
+and at least one accepted route to commit together. A separate keyset repository preserves immutable
+identity across operators, records activity per observation, and retrieves only observations inside a
+caller-supplied freshness interval. Both repositories reconstruct stored records through validated
+adapters before return. See the [merchant invoice API](invoice-api.md) for request and replay semantics.
 
 Later migrations must preserve the fixed invoice and recovery contracts and provide atomic transitions
 for:
@@ -215,3 +217,4 @@ justify it.
 - [ADR-0009: Reject unverified Cashu payments](adr/0009-reject-unverified-cashu-payments.md)
 - [ADR-0010: Offline Cashu proof validation](adr/0010-validate-cashu-proofs-offline.md)
 - [ADR-0011: Bounded Cashu keyset observation](adr/0011-observe-cashu-keysets.md)
+- [ADR-0012: Durable Cashu keyset evidence](adr/0012-persist-cashu-keyset-evidence.md)

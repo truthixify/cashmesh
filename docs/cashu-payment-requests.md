@@ -147,9 +147,14 @@ and the existing snapshot validator recomputes every supported keyset ID.
 
 This is transport-authenticated observation of a configured host, not signed operator metadata. The
 client must never be constructed directly from the payer's mint field. It performs no automatic retry,
-persists no collision history, assigns no freshness lifetime, sends no NUT-21 or NUT-22 credential, and
-does not call NUT-07. A later store must reject an ID that conflicts with any historical observation,
-especially because a version `00` ID does not commit its unit, fee, or expiry.
+assigns no freshness lifetime, sends no NUT-21 or NUT-22 credential, and does not call NUT-07.
+
+The acquirer storage boundary can persist the resulting snapshot separately. It keeps key material,
+unit, fee, and final expiry immutable for each normalized mint URL and keyset ID while recording
+activity per operator observation. It rejects historical collisions across operators, treats an exact
+scope-and-time repeat as idempotent, and exposes only the latest snapshot inside caller-supplied
+inclusive freshness bounds. The observer is not scheduled and this store is not wired to payment
+acceptance.
 
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
@@ -168,9 +173,11 @@ they do not prove wallet QR scanning, proof validity, DLEQ verification, input-f
 operator redemption, or merchant settlement. Separate proof tests cover an official NUT-12 vector,
 deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. Keyset
 observer tests cover stable two-pass metadata, unit filtering, concurrency, response bounds, transport
-timeouts, and failure paths entirely through local fixtures. They do not prove endpoint authenticity,
-snapshot freshness, historical collision safety, unspentness, redemption, or merchant settlement. Do
-not present a locally issued fixture request as payable.
+timeouts, and failure paths entirely through local fixtures. PostgreSQL tests cover restart,
+historical collision rejection, freshness bounds, concurrent replay, append-only enforcement, and
+stored-record corruption. They do not prove endpoint authenticity, an appropriate production
+freshness policy, unspentness, redemption, or merchant settlement. Do not present a locally issued
+fixture request as payable.
 
 ## References
 

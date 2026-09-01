@@ -251,6 +251,184 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 2,
   }),
+  Object.freeze({
+    name: "persist_cashu_keyset_observations",
+    sql: `
+      CREATE TABLE cashu_keysets (
+        mint_url VARCHAR(512) NOT NULL,
+        keyset_id VARCHAR(66) NOT NULL,
+        unit VARCHAR(32) NOT NULL,
+        input_fee_ppk BIGINT NOT NULL,
+        final_expiry BIGINT,
+        keys JSONB NOT NULL,
+        identity_fingerprint CHAR(64) NOT NULL,
+        CONSTRAINT cashu_keysets_pkey PRIMARY KEY (mint_url, keyset_id),
+        CONSTRAINT cashu_keysets_mint_id_unit_unique UNIQUE (mint_url, keyset_id, unit),
+        CONSTRAINT cashu_keysets_mint_url CHECK (
+          mint_url ~ '^https://[^[:space:]]+$'
+        ),
+        CONSTRAINT cashu_keysets_id CHECK (
+          keyset_id ~ '^(00[0-9a-f]{14}|01[0-9a-f]{64})$'
+        ),
+        CONSTRAINT cashu_keysets_unit CHECK (
+          unit ~ '^[a-z0-9][a-z0-9._:-]*$'
+        ),
+        CONSTRAINT cashu_keysets_input_fee CHECK (
+          input_fee_ppk >= 0 AND input_fee_ppk <= 9007199254740991
+        ),
+        CONSTRAINT cashu_keysets_final_expiry CHECK (
+          final_expiry IS NULL
+          OR (final_expiry > 0 AND final_expiry <= 9007199254740991)
+        ),
+        CONSTRAINT cashu_keysets_keys CHECK (
+          jsonb_typeof(keys) = 'object' AND keys <> '{}'::jsonb
+        ),
+        CONSTRAINT cashu_keysets_identity_fingerprint CHECK (
+          identity_fingerprint ~ '^[0-9a-f]{64}$'
+        )
+      );
+
+      CREATE TABLE cashu_keyset_observations (
+        snapshot_fingerprint CHAR(64) PRIMARY KEY,
+        operator_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        unit VARCHAR(32) NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        observed_at BIGINT NOT NULL,
+        CONSTRAINT cashu_keyset_observations_scope_time_unique UNIQUE (
+          operator_id,
+          mint_url,
+          unit,
+          observed_at
+        ),
+        CONSTRAINT cashu_keyset_observations_fingerprint_scope_unique UNIQUE (
+          snapshot_fingerprint,
+          mint_url,
+          unit
+        ),
+        CONSTRAINT cashu_keyset_observations_fingerprint CHECK (
+          snapshot_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_keyset_observations_operator CHECK (
+          operator_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_keyset_observations_mint_url CHECK (
+          mint_url ~ '^https://[^[:space:]]+$'
+        ),
+        CONSTRAINT cashu_keyset_observations_unit CHECK (
+          unit ~ '^[a-z0-9][a-z0-9._:-]*$'
+        ),
+        CONSTRAINT cashu_keyset_observations_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_keyset_observations_observed_at CHECK (
+          observed_at >= 0 AND observed_at <= 9007199254740991
+        )
+      );
+
+      CREATE INDEX cashu_keyset_observations_latest_idx
+        ON cashu_keyset_observations (
+          operator_id,
+          mint_url,
+          unit,
+          observed_at DESC,
+          snapshot_fingerprint
+        );
+
+      CREATE TABLE cashu_keyset_observation_entries (
+        snapshot_fingerprint CHAR(64) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        unit VARCHAR(32) NOT NULL,
+        position SMALLINT NOT NULL,
+        keyset_id VARCHAR(66) NOT NULL,
+        active BOOLEAN NOT NULL,
+        CONSTRAINT cashu_keyset_observation_entries_pkey PRIMARY KEY (
+          snapshot_fingerprint,
+          position
+        ),
+        CONSTRAINT cashu_keyset_observation_entries_keyset_unique UNIQUE (
+          snapshot_fingerprint,
+          keyset_id
+        ),
+        CONSTRAINT cashu_keyset_observation_entries_position CHECK (
+          position >= 0 AND position < 64
+        ),
+        CONSTRAINT cashu_keyset_observation_entries_observation_fkey
+          FOREIGN KEY (snapshot_fingerprint, mint_url, unit)
+          REFERENCES cashu_keyset_observations (snapshot_fingerprint, mint_url, unit)
+          ON DELETE RESTRICT,
+        CONSTRAINT cashu_keyset_observation_entries_keyset_fkey
+          FOREIGN KEY (mint_url, keyset_id, unit)
+          REFERENCES cashu_keysets (mint_url, keyset_id, unit)
+          ON DELETE RESTRICT
+      );
+
+      CREATE FUNCTION cashmesh_reject_cashu_keyset_evidence_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Cashu keyset evidence is append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER cashu_keysets_append_only
+        BEFORE UPDATE OR DELETE ON cashu_keysets
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_keyset_evidence_mutation();
+
+      CREATE TRIGGER cashu_keyset_observations_append_only
+        BEFORE UPDATE OR DELETE ON cashu_keyset_observations
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_keyset_evidence_mutation();
+
+      CREATE TRIGGER cashu_keyset_observation_entries_append_only
+        BEFORE UPDATE OR DELETE ON cashu_keyset_observation_entries
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_keyset_evidence_mutation();
+
+      CREATE FUNCTION cashmesh_require_cashu_keyset_observation_entry()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        observation_fingerprint CHAR(64);
+      BEGIN
+        IF TG_TABLE_NAME = 'cashu_keyset_observations' THEN
+          observation_fingerprint := NEW.snapshot_fingerprint;
+        ELSE
+          observation_fingerprint := OLD.snapshot_fingerprint;
+        END IF;
+
+        IF EXISTS (
+          SELECT 1
+          FROM cashu_keyset_observations
+          WHERE snapshot_fingerprint = observation_fingerprint
+        ) AND NOT EXISTS (
+          SELECT 1
+          FROM cashu_keyset_observation_entries
+          WHERE snapshot_fingerprint = observation_fingerprint
+        ) THEN
+          RAISE EXCEPTION 'Cashu keyset observation requires at least one entry'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER cashu_keyset_observations_entry_required
+        AFTER INSERT OR UPDATE ON cashu_keyset_observations
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_cashu_keyset_observation_entry();
+
+      CREATE CONSTRAINT TRIGGER cashu_keyset_observation_entries_required
+        AFTER DELETE OR UPDATE ON cashu_keyset_observation_entries
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_cashu_keyset_observation_entry();
+    `,
+    version: 3,
+  }),
 ]);
 
 export async function applyPostgresMigrations(client: PoolClient): Promise<void> {
