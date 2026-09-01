@@ -12,6 +12,22 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CASHMESH_TEST_DATABASE_URL: postgresql://cashmesh:cashmesh_ci@127.0.0.1:5432/cashmesh
+    services:
+      postgres:
+        image: postgres:18.6-alpine3.23@sha256:697c180dbf244d3ce4a8f4cbc0156cde840af055c1bf8b76aebe422a4822086f
+        env:
+          POSTGRES_DB: cashmesh
+          POSTGRES_PASSWORD: cashmesh_ci
+          POSTGRES_USER: cashmesh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cashmesh -d cashmesh"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

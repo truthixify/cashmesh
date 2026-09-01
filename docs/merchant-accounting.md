@@ -1,10 +1,10 @@
 # Merchant Accounting Contract
 
-**Status:** Domain contract implemented; persistence and payment orchestration not implemented
+**Status:** Domain contract and open-invoice persistence implemented; payment orchestration not implemented
 
-This document defines the first CashMesh merchant invoice and journal schemas. The implementation is
-pure domain logic in `packages/domain`: it does not accept Cashu proofs, call an operator, write a
-database, settle a merchant, or emit a receipt.
+This document defines the first CashMesh merchant invoice and journal schemas. Domain behavior remains
+in `packages/domain`. The acquirer now persists open invoice issuance, but it does not accept Cashu
+proofs, call an operator, persist a paid-invoice journal, settle a merchant, or emit a receipt.
 
 ## Common Representation
 
@@ -95,7 +95,7 @@ Trusted-hold asset accounts are operator-specific. Immediate conversion must deb
 settlement-asset account. Neither entry proves that proofs were valid or conversion succeeded; the
 payment orchestrator must establish that fact before it invokes the accounting transition.
 
-## Atomic Persistence Contract
+## Atomic Payment Persistence Contract
 
 `acceptInvoicePaymentV1` returns the paid invoice and balanced journal together. A persistence adapter
 must write both in one database transaction. At minimum that transaction must:
@@ -112,8 +112,9 @@ payment, and journal identifiers are a required persistence invariant.
 
 ## Deliberate Limits
 
-- No API or database schema is implemented.
-- No NUT-18 request is generated or parsed.
+- Open invoice creation and lookup are implemented with PostgreSQL; terminal invoice and journal
+  persistence are not.
+- The invoice API does not yet attach the implemented NUT-18 request or accept its payment payload.
 - No proofs, DLEQ evidence, keysets, operator fee quotes, or spent state are validated.
 - No operator policy snapshot, cap decision, or suspension state is recorded yet.
 - No conversion, redemption, payout, refund, reversal, or chargeback entry exists.

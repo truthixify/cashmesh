@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   IdentifierError,
+  idempotencyKey,
   invoiceId,
   journalEntryId,
   merchantId,
@@ -13,6 +14,7 @@ import {
 
 describe("domain identifiers", () => {
   it("constructs typed identifiers from durable URL-safe values", () => {
+    expect(idempotencyKey("checkout-attempt_0001")).toBe("checkout-attempt_0001");
     expect(invoiceId("inv:merchant-1:0001")).toBe("inv:merchant-1:0001");
     expect(journalEntryId("journal_0001")).toBe("journal_0001");
     expect(merchantId("merchant.example")).toBe("merchant.example");

@@ -10,6 +10,8 @@
   "scripts": {
     "build": "pnpm -r --if-present build",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "db:down": "docker compose down",
+    "db:up": "docker compose up -d --wait postgres",
     "dev": "pnpm --parallel --filter @cashmesh/acquirer-api --filter @cashmesh/merchant-console dev",
     "dev:api": "pnpm --filter @cashmesh/acquirer-api dev",
     "dev:merchant": "pnpm --filter @cashmesh/merchant-console dev",
@@ -17,6 +19,7 @@
     "lint": "biome check apps services packages && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings",
     "test": "pnpm test:js && pnpm test:rust",
     "test:e2e": "pnpm --filter @cashmesh/merchant-console test:e2e",
+    "test:integration": "pnpm --filter @cashmesh/acquirer-api test:integration",
     "test:js": "pnpm -r --if-present test",
     "test:rust": "cargo test --workspace",
     "typecheck": "pnpm -r --if-present typecheck"

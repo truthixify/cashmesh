@@ -7,10 +7,15 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "test": "vitest run",
+    "test:integration": "vitest run test/postgres-invoice-repository.test.ts",
     "typecheck": "tsc --project tsconfig.json"
   },
   "dependencies": {
     "@cashmesh/domain": "workspace:*",
-    "fastify": "5.12.1"
+    "fastify": "5.12.1",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
   }
 }

@@ -5,6 +5,7 @@ export type Identifier<Kind extends string> = string & {
   readonly [identifierBrand]: Kind;
 };
 
+export type IdempotencyKey = Identifier<"idempotency">;
 export type InvoiceId = Identifier<"invoice">;
 export type JournalEntryId = Identifier<"journal_entry">;
 export type MerchantId = Identifier<"merchant">;
@@ -28,6 +29,10 @@ export class IdentifierError extends Error {
 
 export function invoiceId(value: string): InvoiceId {
   return identifier(value, "invoice");
+}
+
+export function idempotencyKey(value: string): IdempotencyKey {
+  return identifier(value, "idempotency");
 }
 
 export function journalEntryId(value: string): JournalEntryId {

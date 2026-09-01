@@ -6,6 +6,7 @@
 - pnpm 10.28.2
 - Rust 1.93.1 with `rustfmt` and `clippy`
 - Chromium through Playwright for browser tests
+- Docker with Compose, or PostgreSQL 18.6
 
 The repository pins the Node major in `.nvmrc`, the pnpm release in `package.json`, and the Rust
 toolchain in `rust-toolchain.toml`.
@@ -25,6 +26,7 @@ seed phrases, bearer proofs, or production credentials in environment files.
 Start the merchant console and acquirer API together:
 
 ```bash
+pnpm db:up
 pnpm dev
 ```
 
@@ -40,6 +42,8 @@ The merchant console currently uses labeled fixtures. The acquirer API exposes:
 ```text
 GET  /health
 POST /v1/operator-policy/evaluate
+POST /v1/merchants/:merchantId/invoices
+GET  /v1/merchants/:merchantId/invoices/:invoiceId
 ```
 
 Example policy request:
@@ -52,6 +56,13 @@ curl -s http://127.0.0.1:3100/v1/operator-policy/evaluate \
 
 The expected decision forces `immediate_conversion`.
 
+The Compose service uses local-only test credentials from `.env.example`. Stop the container without
+deleting its named data volume with:
+
+```bash
+pnpm db:down
+```
+
 ## Checks
 
 ```bash
@@ -61,6 +72,13 @@ pnpm test       # Vitest and Cargo tests
 pnpm build      # production application builds
 pnpm check      # all of the above
 pnpm test:e2e   # merchant console at mobile, tablet, and desktop widths
+```
+
+Run the real PostgreSQL repository suite while the Compose service is healthy:
+
+```bash
+CASHMESH_TEST_DATABASE_URL=postgresql://cashmesh:cashmesh_local@127.0.0.1:5432/cashmesh \
+  pnpm test:integration
 ```
 
 The optional read-only testnet identity probe performs no signing or transaction submission:
@@ -75,7 +93,8 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 |---|---|---|
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
 | Cashu request adapter | `pnpm --filter @cashmesh/cashu test` | Strict NUT-18 mapping, policy boundaries, and deterministic cashu-ts decoding |
-| Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation and policy wiring |
+| Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, policy, invoice replay, lookup, and sanitized failures |
+| PostgreSQL invoice integration | `pnpm test:integration` | Migration, restart, concurrency, replay, ownership, and rollback behavior |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
 | NUT-18 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut18_interoperability` | Pinned CDK decodes the cashu-ts fixture with the intended fields |
 | Merchant browser | `pnpm test:e2e` | Responsive layout and invoice fixture interaction |
@@ -90,6 +109,9 @@ Never describe a lower test layer as proof that an unimplemented higher layer wo
 Dependencies are exact in manifests and reproducible through `pnpm-lock.yaml` and `Cargo.lock`.
 Protocol clients must be introduced only with a compatibility test and an ADR or protocol-profile
 update. CDK and cashu-ts release candidates require exact pins.
+
+The normal local test command skips PostgreSQL integration when `CASHMESH_TEST_DATABASE_URL` is absent.
+CI supplies a real PostgreSQL 18.6 service and runs those tests as part of `pnpm check`.
 
 ## Local Research
 

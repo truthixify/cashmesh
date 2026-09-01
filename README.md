@@ -15,6 +15,7 @@ merchant balances, or move funds.
 - Represent USDC amounts as integer minor units.
 - Create versioned invoices with deterministic paid, expired, and cancelled transitions.
 - Pair payment acceptance with an immutable, balanced, operator-aware merchant journal.
+- Persist open invoices with PostgreSQL and make concurrent merchant retries converge on one record.
 - Construct deterministic strict NUT-18 requests for accepted operators and the `stellar` method.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
@@ -51,7 +52,7 @@ frameworks adapt to it at the edges.
 | Path | Responsibility |
 |---|---|
 | `apps/merchant-console/` | Next.js merchant operations reference client |
-| `services/acquirer-api/` | Fastify health and operator-policy API |
+| `services/acquirer-api/` | Fastify policy and durable merchant-invoice API |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
 | `packages/cashu/` | Strict NUT-18 request adapter and cross-implementation fixture |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |
@@ -59,10 +60,11 @@ frameworks adapt to it at the edges.
 
 ## Quick Start
 
-Requirements: Node.js 24, pnpm 10.28, and Rust 1.93.1.
+Requirements: Node.js 24, pnpm 10.28, Rust 1.93.1, and Docker with Compose.
 
 ```bash
 pnpm install
+pnpm db:up
 pnpm dev
 ```
 
@@ -78,6 +80,7 @@ pnpm test:e2e
 
 See [development setup](docs/development.md), [architecture](docs/architecture.md), the
 [merchant accounting contract](docs/merchant-accounting.md), the
+[merchant invoice API](docs/invoice-api.md), the
 [Cashu payment-request profile](docs/cashu-payment-requests.md), the
 [experimental Stellar profile](docs/protocol-profile.md), and the [roadmap](docs/roadmap.md) before
 implementing a network integration.

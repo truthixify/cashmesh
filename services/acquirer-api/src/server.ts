@@ -1,4 +1,17 @@
 import { buildApp } from "./app";
+import { PostgresInvoiceRepository } from "./postgres-invoice-repository";
+
+const LOCAL_DATABASE_URL = "postgresql://cashmesh:cashmesh_local@127.0.0.1:5432/cashmesh";
+
+function readDatabaseUrl(value: string | undefined): string {
+  if (value !== undefined && value.trim() !== "") {
+    return value;
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("CASHMESH_DATABASE_URL is required in production.");
+  }
+  return LOCAL_DATABASE_URL;
+}
 
 function readPort(value: string | undefined): number {
   const port = Number(value ?? "3100");
@@ -8,14 +21,29 @@ function readPort(value: string | undefined): number {
   return port;
 }
 
-const app = buildApp({ logger: true });
-
 try {
-  await app.listen({
-    host: process.env.ACQUIRER_HOST ?? "127.0.0.1",
-    port: readPort(process.env.ACQUIRER_PORT),
-  });
+  await startServer();
 } catch (error) {
-  app.log.error(error);
+  process.stderr.write(
+    `CashMesh acquirer API failed to start: ${error instanceof Error ? error.name : "UnknownError"}\n`,
+  );
   process.exitCode = 1;
+}
+
+async function startServer(): Promise<void> {
+  const port = readPort(process.env.ACQUIRER_PORT);
+  const invoiceRepository = await PostgresInvoiceRepository.connect({
+    connectionString: readDatabaseUrl(process.env.CASHMESH_DATABASE_URL),
+    onBackgroundError: (error) => {
+      process.stderr.write(`CashMesh PostgreSQL idle client failed: ${error.name}\n`);
+    },
+  });
+  const app = buildApp({ invoiceRepository, logger: true });
+
+  try {
+    await app.listen({ host: process.env.ACQUIRER_HOST ?? "127.0.0.1", port });
+  } catch (error) {
+    await app.close();
+    throw error;
+  }
 }

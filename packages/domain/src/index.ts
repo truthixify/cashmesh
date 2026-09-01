@@ -1,9 +1,11 @@
 export {
   assertIdentifier,
   assertUnixTimestamp,
+  type IdempotencyKey,
   type Identifier,
   IdentifierError,
   type InvoiceId,
+  idempotencyKey,
   invoiceId,
   type JournalEntryId,
   journalEntryId,

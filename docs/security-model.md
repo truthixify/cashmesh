@@ -49,6 +49,8 @@ of Cashu or Stellar implementations.
 - Operator tiers and caps are evaluated at payment time and recorded with the decision.
 - A strict payment request lists only accepted operators and never advertises unlisted-mint support.
 - Encoded request intent never replaces server-side invoice expiry, state, or replay enforcement.
+- Stored `open` state never overrides the invoice's half-open validity interval.
+- One merchant/idempotency-key pair commits at most one invoice and changed request terms fail.
 - Merchant balances reconcile to immutable invoice and settlement references.
 - Reserve visibility and redemption probes never become a solvency guarantee.
 
@@ -68,6 +70,8 @@ of Cashu or Stellar implementations.
 | Injected payment metadata | Secret or personal data retained in accounting | Project only declared schema fields into durable domain records |
 | Wrong-merchant journal | Misstated merchant liability | Bind merchant in the reference and require one matching payable credit |
 | Duplicate invoice payment | Double fulfillment or liability | Atomic open-to-paid transition plus database uniqueness constraints |
+| Duplicate invoice creation | Conflicting checkout records | Merchant-scoped request fingerprint and transactional unique reservation |
+| Cross-merchant invoice lookup | Metadata disclosure | Merchant-scoped query returning the same not-found result |
 | Stale or replayed NUT-18 request | Payment against an invalid invoice | Server-side invoice lookup, half-open expiry check, and unique payment reservation |
 | Unsafe request endpoint | Credential leakage or payer redirection | Normalized HTTPS URLs without credentials, queries, or fragments |
 | False advisory-mint claim | Proofs arrive from an unsupported operator | Omit `mp` and reject advisory construction until catch-all conversion exists |
@@ -109,6 +113,17 @@ The current JSON journal uses atomic replacement and owner-only Unix permissions
 invariants. It is safe only for one processor process in an unfunded environment. It does not provide
 cross-process locking, encryption, access audit, backup recovery, or production migrations. Those are
 deployment gates, not optional hardening.
+
+## Acquirer Database Boundary
+
+PostgreSQL now stores open invoices and idempotency fingerprints. Database constraints repeat the
+identifier, amount, unit, schema, ownership, and expiry-shape invariants. Concurrent creation is
+serialized by a unique merchant/key reservation, and invoice plus reservation commit together.
+
+This is not authorization or a production data-protection program. The local Compose credentials are
+test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,
+credential rotation, network isolation, access auditing, tested backups and point-in-time recovery,
+retention rules, and merchant authentication before the API is exposed.
 
 ## Mainnet Gates
 
