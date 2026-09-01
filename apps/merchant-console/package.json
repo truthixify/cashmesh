@@ -1,0 +1,28 @@
+{
+  "name": "@cashmesh/merchant-console",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev --port 3000",
+    "start": "next start --port 3000",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --project tsconfig.json"
+  },
+  "dependencies": {
+    "@cashmesh/domain": "workspace:*",
+    "lucide-react": "1.39.0",
+    "next": "16.3.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "postcss": "8.5.26",
+    "tailwindcss": "4.3.3"
+  }
+}

@@ -1,0 +1,9 @@
+[package]
+name = "cashmesh-stellar-settlement"
+description = "Settlement state and recovery invariants for CashMesh Stellar payouts."
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true

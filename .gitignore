@@ -1,0 +1,22 @@
+# JavaScript
+node_modules/
+.pnpm-store/
+.next/
+next-env.d.ts
+dist/
+coverage/
+*.tsbuildinfo
+
+# Rust
+target/
+
+# Tests
+playwright-report/
+test-results/
+
+# Environment and local tools
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

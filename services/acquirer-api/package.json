@@ -1,0 +1,16 @@
+{
+  "name": "@cashmesh/acquirer-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --project tsconfig.json"
+  },
+  "dependencies": {
+    "@cashmesh/domain": "workspace:*",
+    "fastify": "5.12.1"
+  }
+}
