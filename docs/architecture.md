@@ -48,8 +48,9 @@ It may depend only on small, runtime-independent utilities with a demonstrated n
 ### Cashu Request Adapter
 
 `packages/cashu` maps a validated open invoice and accepted operator routes to a strict NUT-18
-request. It owns Cashu wire encoding, endpoint normalization, request-size limits, and a versioned
-policy sidecar. It does not receive proofs or decide that an invoice has been paid.
+request. It also inspects bounded raw payment payloads and returns only non-secret envelope metadata.
+It owns Cashu wire encoding, endpoint normalization, transport-size limits, and a versioned policy
+sidecar. It does not validate proof integrity or decide that an invoice has been paid.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -68,9 +69,9 @@ The adapter pins a current release-candidate cashu-ts version behind this bounda
 - receipts, refund records, webhooks, and reconciliation; and
 - manual-attention workflows.
 
-The API exposes health, operator-policy evaluation, and durable open-invoice plus strict NUT-18
-request creation and lookup. Authentication, payment receipt, and terminal invoice transitions are not
-yet implemented.
+The API exposes health, operator-policy evaluation, durable open-invoice plus strict NUT-18 request
+creation and lookup, and a non-accepting payment-envelope endpoint. Authentication, proof acceptance,
+and terminal invoice transitions are not yet implemented.
 
 ### Merchant Console
 
@@ -206,3 +207,4 @@ justify it.
 - [ADR-0006: Isolated NUT-18 request adapter](adr/0006-isolate-nut18-request-adapter.md)
 - [ADR-0007: PostgreSQL invoice issuance](adr/0007-postgres-invoice-issuance.md)
 - [ADR-0008: Persisted Cashu request snapshots](adr/0008-persist-cashu-request-snapshots.md)
+- [ADR-0009: Reject unverified Cashu payments](adr/0009-reject-unverified-cashu-payments.md)

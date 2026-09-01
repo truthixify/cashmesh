@@ -62,10 +62,17 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
     await closeRepository(firstRepository);
 
     const restartedRepository = await connectRepository();
+    const foundByPaymentId = await restartedRepository.findOpenInvoiceById(
+      invoiceId("invoice-001"),
+    );
     const replay = await restartedRepository.createOpenInvoice(
       record({ invoiceId: "invoice-candidate-after-restart" }),
     );
 
+    expect(foundByPaymentId).toEqual({
+      cashuPaymentRequest: first.cashuPaymentRequest,
+      invoice: first.invoice,
+    });
     expect(first.replayed).toBe(false);
     expect(replay.replayed).toBe(true);
     expect(replay.invoice).toEqual(first.invoice);
@@ -108,12 +115,23 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
       headers: { "idempotency-key": "checkout-api-001" },
       payload: { amount: 1_234, expiresAt: 1_788_000_300 },
     });
+    const expiredPayment = await restartedApp.inject({
+      method: "POST",
+      url: "/v1/cashu/payments",
+      headers: { "content-type": "application/json" },
+      payload: paymentPayload("invoice-api-001"),
+    });
     await restartedApp.close();
     repositories.splice(repositories.indexOf(restartedRepository), 1);
 
     expect(first.statusCode).toBe(201);
     expect(replay.statusCode).toBe(200);
     expect(replay.json()).toEqual({ ...first.json(), replayed: true });
+    expect(expiredPayment.statusCode).toBe(410);
+    expect(expiredPayment.headers["cache-control"]).toBe("no-store");
+    expect(expiredPayment.json()).toMatchObject({
+      error: { code: "payment_request_expired" },
+    });
   });
 
   it("serializes concurrent requests with the same merchant idempotency key", async () => {
@@ -160,6 +178,10 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
     await expect(
       repository.findOpenInvoice(merchantId("merchant-001"), invoiceId("invoice-001")),
     ).resolves.toEqual({
+      cashuPaymentRequest: first.cashuPaymentRequest,
+      invoice: first.invoice,
+    });
+    await expect(repository.findOpenInvoiceById(invoiceId("invoice-001"))).resolves.toEqual({
       cashuPaymentRequest: first.cashuPaymentRequest,
       invoice: first.invoice,
     });
@@ -379,6 +401,22 @@ function record(
     invoice,
     requestFingerprint: overrides.fingerprint ?? "a".repeat(64),
   };
+}
+
+function paymentPayload(requestedInvoiceId: string): string {
+  return JSON.stringify({
+    id: requestedInvoiceId,
+    mint: "https://mint-a.cashmesh.example",
+    proofs: [
+      {
+        C: `02${"11".repeat(32)}`,
+        amount: 1_234,
+        id: "009a1f293253e41e",
+        secret: "test-only-no-value",
+      },
+    ],
+    unit: "usdc",
+  });
 }
 
 async function expectRowCounts(expected: {

@@ -85,4 +85,11 @@ export class FakeInvoiceRepository implements InvoiceRepository {
     const invoice = this.invoices.get(requestedInvoiceId);
     return invoice?.invoice.merchantId === ownerId ? invoice : undefined;
   }
+
+  async findOpenInvoiceById(requestedInvoiceId: InvoiceId): Promise<IssuedInvoiceV1 | undefined> {
+    if (this.failure !== undefined) {
+      throw this.failure;
+    }
+    return this.invoices.get(requestedInvoiceId);
+  }
 }

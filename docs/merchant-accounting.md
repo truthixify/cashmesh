@@ -4,9 +4,9 @@
 not implemented
 
 This document defines the first CashMesh merchant invoice and journal schemas. Domain behavior remains
-in `packages/domain`. The acquirer now persists open invoice issuance and its strict NUT-18 request,
-but it does not accept Cashu proofs, call an operator, persist a paid-invoice journal, settle a
-merchant, or emit a receipt.
+in `packages/domain`. The acquirer now persists open invoice issuance and its strict NUT-18 request
+and can reject a bound payment envelope, but it does not validate or accept Cashu proofs, call an
+operator, persist a paid-invoice journal, settle a merchant, or emit a receipt.
 
 ## Common Representation
 
@@ -116,7 +116,8 @@ payment, and journal identifiers are a required persistence invariant.
 
 - Open invoice creation and lookup are implemented with PostgreSQL; terminal invoice and journal
   persistence are not.
-- The invoice API attaches the strict NUT-18 request but does not accept its payment payload.
+- The invoice API attaches the strict NUT-18 request and inspects its payment envelope but never
+  accepts the payment.
 - No proofs, DLEQ evidence, keysets, operator fee quotes, or spent state are validated.
 - The issued operator-policy snapshot is recorded; merchant-specific cap decisions and suspension
   state are not.

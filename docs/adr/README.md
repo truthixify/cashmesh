@@ -15,3 +15,4 @@ Current decisions:
 - [ADR-0006: Isolate the NUT-18 Request Adapter](0006-isolate-nut18-request-adapter.md)
 - [ADR-0007: Persist Invoice Issuance in PostgreSQL](0007-postgres-invoice-issuance.md)
 - [ADR-0008: Persist Cashu Request Snapshots with Invoices](0008-persist-cashu-request-snapshots.md)
+- [ADR-0009: Reject Unverified Cashu Payment Payloads](0009-reject-unverified-cashu-payments.md)

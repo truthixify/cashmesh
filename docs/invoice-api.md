@@ -4,8 +4,9 @@
 implemented
 
 The acquirer API persists version `1` USDC invoices in PostgreSQL and requires a merchant-scoped
-idempotency key for every creation request. It does not yet authenticate merchants, receive NUT-18
-payment payloads, validate Cashu proofs, or transition invoices out of `open`.
+idempotency key for every creation request. It can inspect and bind a NUT-18 payment envelope, but it
+does not yet authenticate merchants, validate or reserve Cashu proofs, or transition invoices out of
+`open`.
 
 ## Create an Invoice
 
@@ -119,6 +120,48 @@ can therefore return `state=open` after `expiresAt`; clients and the future paym
 apply the invoice validity interval `[createdAt, expiresAt)` and must not treat that state alone as
 authorization to accept payment.
 
+## Inspect a Payment Envelope
+
+```http
+POST /v1/cashu/payments
+Content-Type: application/json
+
+{
+  "id": "inv_00000000-0000-4000-8000-000000000000",
+  "mint": "https://mint-a.example",
+  "unit": "usdc",
+  "proofs": [
+    {
+      "amount": 1234,
+      "id": "009a1f293253e41e",
+      "secret": "test-only-no-value",
+      "C": "021111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}
+```
+
+The proof above is structural test data and cannot carry value. This is the POST path advertised by the
+default request profile. It accepts at most 64 KiB and 128 proofs, preserves exact JSON integer amounts
+through the pinned Cashu decoder, and discards memo, proof, and undeclared payer fields after deriving a
+metadata-only envelope. The invoice ID is globally unique, so this wallet-facing route does not require
+a merchant ID and returns no invoice data.
+
+The route checks that the invoice exists, remains within `[createdAt, expiresAt)`, uses the same unit,
+lists the normalized mint, and is not definitely underpaid before input fees. It never returns 2xx.
+A matching envelope returns `503 proof_validation_unavailable`; no proof is stored, reserved, spent,
+or submitted to an operator.
+
+| Status | Meaning |
+|---:|---|
+| `400` | Malformed NUT-18 envelope |
+| `404` | Invoice/request ID not found |
+| `410` | Invoice request expired |
+| `413` | Body exceeds 64 KiB |
+| `415` | Media type is not `application/json` |
+| `422` | Unit, mint, or definite gross amount mismatch |
+| `503` | Proof validation is unavailable or storage failed |
+
 ## PostgreSQL Boundary
 
 The repository uses exact `pg` version `8.23.0`. Local and CI integration tests run against the
@@ -157,7 +200,7 @@ clients or adopted as stable API codes.
 Invoice identifiers, amounts, timing, merchant identifiers, and idempotency keys are sensitive payment
 metadata. Do not put customer identity or secrets into identifiers or keys. Merchant authentication and
 authorization are mandatory before any public or multi-tenant deployment; the current local API does
-not implement them. The configured NUT-18 POST target is not yet implemented by this service, so the
+not implement them. The NUT-18 POST path is envelope-only and always rejects unverified proofs, so the
 local fixture request must not be presented as payable.
 
 Automatic HTTP access logs are disabled because request paths contain merchant and invoice identifiers.

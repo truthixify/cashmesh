@@ -45,6 +45,7 @@ GET  /health
 POST /v1/operator-policy/evaluate
 POST /v1/merchants/:merchantId/invoices
 GET  /v1/merchants/:merchantId/invoices/:invoiceId
+POST /v1/cashu/payments
 ```
 
 Example policy request:
@@ -66,8 +67,9 @@ export CASHMESH_CASHU_TRANSPORT_URL=https://pay.example/v1/cashu/payments
 ```
 
 `NODE_ENV=production` requires both values and rejects malformed, duplicate, unlisted, non-HTTPS, or
-oversized profiles before opening the database. The configured POST target is not implemented yet;
-the local request is issuance evidence, not a payable checkout.
+oversized profiles before opening the database. The API implements the POST path only as a bounded,
+non-retaining envelope check and always rejects unverified proofs; the local request is not a payable
+checkout.
 
 The Compose service uses local-only test credentials from `.env.example`. Stop the container without
 deleting its named data volume with:
@@ -105,8 +107,8 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 | Layer | Current command | What it proves |
 |---|---|---|
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
-| Cashu request adapter | `pnpm --filter @cashmesh/cashu test` | Strict NUT-18 mapping, policy boundaries, and deterministic cashu-ts decoding |
-| Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, runtime Cashu configuration, replay, lookup, projection, and sanitized failures |
+| Cashu request adapter | `pnpm --filter @cashmesh/cashu test` | Strict NUT-18 mapping, raw payload bounds, metadata projection, and deterministic decoding |
+| Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, runtime Cashu configuration, replay, envelope binding, privacy, and sanitized failures |
 | PostgreSQL invoice integration | `pnpm test:integration` | Migration, atomic request persistence, restart, concurrency, replay, corruption, ownership, and rollback behavior |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
 | NUT-18 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut18_interoperability` | Pinned CDK decodes the cashu-ts fixture with the intended fields |

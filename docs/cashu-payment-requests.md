@@ -1,7 +1,7 @@
 # Cashu Merchant Payment Requests
 
-**Status:** Strict request construction and durable invoice issuance implemented; payment receipt and
-proof validation not implemented
+**Status:** Strict request construction, durable issuance, and non-accepting HTTP envelope intake
+implemented; proof validation and payment acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -83,6 +83,25 @@ policy tuples, or a sidecar that cannot be reconstructed to the stored encoded b
   not a claim that every resulting request is practical to scan as a QR code.
 - The adapter copies only declared invoice and policy fields and returns deeply immutable records.
 
+## HTTP Payment Envelope
+
+`POST /v1/cashu/payments` accepts the NUT-18 `PaymentRequestPayload` only as raw
+`application/json`. The route is capped at 64 KiB and 128 proofs so Fastify does not parse bearer
+amounts through ordinary JavaScript JSON or buffer an unbounded proof set. The pinned decoder preserves
+integer precision. CashMesh then returns only invoice ID, normalized mint, unit, proof count, and exact
+safe-integer gross amount across the adapter boundary; memo, secrets, signatures, DLEQ data, witnesses,
+and undeclared metadata are discarded.
+
+The service loads the persisted request by its globally unique invoice ID and checks the half-open
+expiry interval, exact `usdc` unit, strict mint allowlist, and gross amount. Gross value at least equal
+to the invoice is necessary but not sufficient: NUT-18 defines the requested amount net of input fees.
+
+The endpoint deliberately has no success response. A payload that passes every implemented check
+returns `503 proof_validation_unavailable`. It does not retain or reserve proofs, call a mint, inspect
+spent state, verify a keyset or DLEQ proof, calculate input fees, transition the invoice, or write a
+merchant journal. Malformed and mismatched payloads return non-success responses without reflecting
+their contents. Every response uses `Cache-Control: no-store`.
+
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
 and support artifacts. Avoid putting customer identity or secrets into invoice identifiers or URLs.
@@ -94,10 +113,11 @@ adapter. TypeScript tests decode it with the pinned cashu-ts implementation and 
 field set. A Rust interoperability test decodes the same bytes with pinned CDK NUT-18 types and checks
 the identifier, amount, unit, mint list, strict semantics, Stellar method, and POST transport.
 
-This proves request encoding compatibility at the two library boundaries. It does not prove wallet QR
-scanning, HTTP receipt, proof validity, DLEQ verification, input-fee calculation, operator redemption,
-or merchant settlement. The configured POST transport is descriptive until the receiver endpoint is
-implemented; do not present a locally issued fixture request as payable.
+This proves request encoding compatibility at the two library boundaries. The HTTP tests prove
+precision-preserving envelope parsing, stored-request binding, rejection behavior, and non-retention;
+they do not prove wallet QR scanning, proof validity, DLEQ verification, input-fee calculation,
+operator redemption, or merchant settlement. Do not present a locally issued fixture request as
+payable.
 
 ## References
 

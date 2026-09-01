@@ -52,6 +52,7 @@ of Cashu or Stellar implementations.
 - Stored `open` state never overrides the invoice's half-open validity interval.
 - One merchant/idempotency-key pair commits at most one invoice and changed request terms fail.
 - An issued invoice, encoded request, transport, and operator-policy snapshot commit atomically.
+- An unverified payment envelope never returns success, reserves value, or changes invoice state.
 - Merchant balances reconcile to immutable invoice and settlement references.
 - Reserve visibility and redemption probes never become a solvency guarantee.
 
@@ -74,6 +75,7 @@ of Cashu or Stellar implementations.
 | Duplicate invoice creation | Conflicting checkout records | Merchant-scoped request fingerprint and transactional unique reservation |
 | Cross-merchant invoice lookup | Metadata disclosure | Merchant-scoped query returning the same not-found result |
 | Request rewritten after issuance | Payer redirection or changed accepted liability | Persist exact encoded bytes and normalized route decisions with the invoice |
+| Oversized or imprecise proof payload | Resource exhaustion or wrong amount comparison | Raw JSON byte/proof caps and exact integer decoding before policy lookup |
 | Stale or replayed NUT-18 request | Payment against an invalid invoice | Server-side invoice lookup, half-open expiry check, and unique payment reservation |
 | Unsafe request endpoint | Credential leakage or payer redirection | Normalized HTTPS URLs without credentials, queries, or fragments |
 | False advisory-mint claim | Proofs arrive from an unsupported operator | Omit `mp` and reject advisory construction until catch-all conversion exists |
@@ -128,9 +130,15 @@ adapter and reject a stored policy or encoded value that does not match. Product
 server-owned; merchant HTTP input cannot claim that an arbitrary mint is trusted.
 
 Fastify automatic request logging is disabled because route paths contain merchant and invoice
-identifiers. Application failures log only a stable error class name. Any future access telemetry must
-use route templates or explicit low-cardinality labels and must not record URLs, idempotency keys,
-encoded requests, proof payloads, or operator credentials.
+identifiers. Storage and initialization failures log only a stable error class name; expected payment
+rejections do not create one log entry per public request. Any future access telemetry must use route
+templates or explicit low-cardinality labels and must not record URLs, idempotency keys, encoded
+requests, proof payloads, or operator credentials.
+
+The NUT-18 POST route parses at most 64 KiB and 128 proofs from raw JSON, projects only non-secret
+envelope metadata, and binds it to the stored invoice request. It always rejects after these checks.
+No bearer proof is persisted or considered reserved, and no successful response exists until proof
+validation and accounting can commit atomically.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

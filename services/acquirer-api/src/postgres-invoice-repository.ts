@@ -68,6 +68,28 @@ interface PostgresErrorShape {
   readonly constraint?: unknown;
 }
 
+const ISSUED_INVOICE_SELECT = `
+  SELECT
+    invoice.id,
+    invoice.merchant_id,
+    invoice.schema_version,
+    invoice.unit,
+    invoice.amount,
+    invoice.created_at,
+    invoice.expires_at,
+    invoice.state,
+    cashu.schema_version AS cashu_schema_version,
+    cashu.encoded_request,
+    cashu.encoding,
+    cashu.issued_at,
+    cashu.mint_policy,
+    cashu.transport_url
+  FROM merchant_invoices AS invoice
+  LEFT JOIN invoice_cashu_requests AS cashu
+    ON cashu.invoice_id = invoice.id
+    AND cashu.merchant_id = invoice.merchant_id
+`;
+
 export interface PostgresInvoiceRepositoryOptions {
   readonly connectionString: string;
   readonly maxConnections?: number;
@@ -203,29 +225,27 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     try {
       client = await this.pool.connect();
       const result = await client.query<InvoiceRow>(
-        `
-          SELECT
-            invoice.id,
-            invoice.merchant_id,
-            invoice.schema_version,
-            invoice.unit,
-            invoice.amount,
-            invoice.created_at,
-            invoice.expires_at,
-            invoice.state,
-            cashu.schema_version AS cashu_schema_version,
-            cashu.encoded_request,
-            cashu.encoding,
-            cashu.issued_at,
-            cashu.mint_policy,
-            cashu.transport_url
-          FROM merchant_invoices AS invoice
-          LEFT JOIN invoice_cashu_requests AS cashu
-            ON cashu.invoice_id = invoice.id
-            AND cashu.merchant_id = invoice.merchant_id
-          WHERE invoice.merchant_id = $1 AND invoice.id = $2
-        `,
+        `${ISSUED_INVOICE_SELECT}
+          WHERE invoice.merchant_id = $1 AND invoice.id = $2`,
         [ownerId, requestedInvoiceId],
+      );
+      const row = result.rows[0];
+      return row === undefined ? undefined : await this.mapIssuedInvoice(client, row);
+    } catch (error) {
+      throw mapStorageError(error);
+    } finally {
+      client?.release();
+    }
+  }
+
+  async findOpenInvoiceById(requestedInvoiceId: InvoiceId): Promise<IssuedInvoiceV1 | undefined> {
+    let client: PoolClient | undefined;
+    try {
+      client = await this.pool.connect();
+      const result = await client.query<InvoiceRow>(
+        `${ISSUED_INVOICE_SELECT}
+          WHERE invoice.id = $1`,
+        [requestedInvoiceId],
       );
       const row = result.rows[0];
       return row === undefined ? undefined : await this.mapIssuedInvoice(client, row);

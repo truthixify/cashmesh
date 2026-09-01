@@ -49,3 +49,6 @@ backfill or retire those local-only records first.
 Add merchant-specific persisted route profiles when authentication and merchant configuration exist.
 Add a versioned `creqB` representation without rewriting stored `creqA` bytes. Replace the strict-only
 profile only after policy can honestly accept and settle proofs from unlisted operators.
+
+ADR-0009 adds an envelope-only HTTP receiver that binds payload metadata to this snapshot but rejects
+every unverified payment.

@@ -8,6 +8,7 @@ import {
 } from "@cashmesh/domain";
 import Fastify, {
   type FastifyBaseLogger,
+  type FastifyError,
   type FastifyInstance,
   type FastifyReply,
   type FastifyServerOptions,
@@ -17,6 +18,8 @@ import Fastify, {
 import type { InvoiceRepository } from "./invoice-repository";
 import { registerInvoiceRoutes } from "./invoice-routes";
 import { InvoiceService, InvoiceServiceError } from "./invoice-service";
+import { PaymentIntakeService, PaymentIntakeServiceError } from "./payment-intake-service";
+import { registerPaymentRoutes } from "./payment-routes";
 
 interface PolicyRequestBody {
   readonly requestedMode?: SettlementMode;
@@ -55,6 +58,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       ...(options.invoiceIdFactory !== undefined && { invoiceIdFactory: options.invoiceIdFactory }),
     },
   );
+  const paymentIntakeService = new PaymentIntakeService(options.invoiceRepository, {
+    ...(options.clock !== undefined && { clock: options.clock }),
+  });
 
   app.addHook("onClose", async () => options.invoiceRepository.close());
   app.setErrorHandler((error, request, reply) => handleError(error, request.log, reply));
@@ -68,11 +74,22 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   );
 
   registerInvoiceRoutes(app, invoiceService);
+  registerPaymentRoutes(app, paymentIntakeService);
 
   return app;
 }
 
 function handleError(error: unknown, logger: FastifyBaseLogger, reply: FastifyReply): unknown {
+  if (hasFastifyCode(error, "FST_ERR_CTP_BODY_TOO_LARGE")) {
+    return reply.code(413).send({
+      error: { code: "payload_too_large", message: "Request payload is too large." },
+    });
+  }
+  if (hasFastifyCode(error, "FST_ERR_CTP_INVALID_MEDIA_TYPE")) {
+    return reply.code(415).send({
+      error: { code: "unsupported_media_type", message: "Request media type is unsupported." },
+    });
+  }
   if (
     typeof error === "object" &&
     error !== null &&
@@ -97,6 +114,13 @@ function handleError(error: unknown, logger: FastifyBaseLogger, reply: FastifyRe
     }
     return reply.code(statusCode).send({ error: { code: error.code, message: error.message } });
   }
+  if (error instanceof PaymentIntakeServiceError) {
+    const statusCode = paymentIntakeStatusCode(error);
+    if (error.code === "storage_unavailable") {
+      logger.error({ errorName: error.name }, "Cashu payment intake failed.");
+    }
+    return reply.code(statusCode).send({ error: { code: error.code, message: error.message } });
+  }
 
   logger.error(
     { errorName: error instanceof Error ? error.name : "UnknownError" },
@@ -105,4 +129,28 @@ function handleError(error: unknown, logger: FastifyBaseLogger, reply: FastifyRe
   return reply.code(500).send({
     error: { code: "internal_error", message: "The request could not be completed." },
   });
+}
+
+function hasFastifyCode(error: unknown, code: FastifyError["code"]): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function paymentIntakeStatusCode(error: PaymentIntakeServiceError): number {
+  if (error.code === "invalid_payment_payload") {
+    return 400;
+  }
+  if (error.code === "payment_request_not_found") {
+    return 404;
+  }
+  if (error.code === "payment_request_expired") {
+    return 410;
+  }
+  if (
+    error.code === "payment_amount_insufficient" ||
+    error.code === "payment_mint_not_accepted" ||
+    error.code === "payment_unit_not_accepted"
+  ) {
+    return 422;
+  }
+  return 503;
 }

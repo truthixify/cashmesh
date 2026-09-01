@@ -27,6 +27,7 @@ export interface InvoiceRepository {
   close(): Promise<void>;
   createOpenInvoice(input: CreateOpenInvoiceRecord): Promise<CreateOpenInvoiceResult>;
   findInvoiceCreation(input: FindInvoiceCreationRecord): Promise<IssuedInvoiceV1 | undefined>;
+  findOpenInvoiceById(invoiceId: InvoiceId): Promise<IssuedInvoiceV1 | undefined>;
   findOpenInvoice(
     merchantId: MerchantId,
     invoiceId: InvoiceId,
