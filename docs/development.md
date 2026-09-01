@@ -63,16 +63,23 @@ pnpm check      # all of the above
 pnpm test:e2e   # merchant console at mobile, tablet, and desktop widths
 ```
 
+The optional read-only testnet identity probe performs no signing or transaction submission:
+
+```bash
+cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
+```
+
 ## Test Layers
 
 | Layer | Current command | What it proves |
 |---|---|---|
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Integer amount and operator-policy rules |
 | Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation and policy wiring |
-| Rust settlement | `cargo test --workspace` | At-most-once and ambiguity transitions |
+| Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
 | Merchant browser | `pnpm test:e2e` | Responsive layout and invoice fixture interaction |
-| Cashu integration | Not implemented | Nothing yet |
-| Stellar integration | Not implemented | Nothing yet |
+| Cashu process integration | Not implemented | No running `cdk-mintd` or token issuance yet |
+| Stellar fixture integration | `stellar_compatibility` Rust test | Pinned Horizon decoding, identity, finality, and restart rules |
+| Stellar live integration | Not implemented | No funded signing, submission, or live payment yet |
 
 Never describe a lower test layer as proof that an unimplemented higher layer works.
 

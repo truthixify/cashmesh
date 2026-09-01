@@ -68,8 +68,10 @@ data and no payment state is presented as a live network result.
 
 ### Stellar Settlement Crate
 
-`crates/stellar-settlement` owns the payout state and recovery boundary. Future CDK and Stellar clients
-will adapt to it. It must not conflate transaction submission with successful payment.
+`crates/stellar-settlement` owns the custom CDK payment boundary, exact Stellar profile, deposit
+observer, durable compatibility journal, and payout recovery state. A pinned stock CDK gRPC server and
+a read-only Horizon client adapt to its ports. Transaction signing and submission remain outside the
+crate's implemented network effects. Submission must never be conflated with successful payment.
 
 The current state model is:
 
@@ -77,22 +79,26 @@ The current state model is:
 stateDiagram-v2
     [*] --> Unpaid
     Unpaid --> ProofsReserved
-    ProofsReserved --> Submitted: transaction accepted for submission
+    ProofsReserved --> ProofsReserved: persist envelope and dispatch intent
+    ProofsReserved --> Submitted: exact transaction accepted
     ProofsReserved --> Failed: provable pre-submission failure
     Submitted --> Paid: matching transaction observed final
     Submitted --> NeedsAttention: outcome cannot be observed
 ```
 
-There is intentionally no `Submitted -> Failed` transition. Once an external effect may exist, the
-adapter must observe its remote state before deciding whether proofs can be released.
+Preparation metadata is persisted while the public state remains `proofs_reserved`. A final failed
+ledger observation for that exact hash can terminate the obligation, but a timeout cannot. Once an
+external effect may exist, the adapter observes its remote state before deciding whether proofs can be
+released.
 
 ## Dependency Direction
 
 ```text
 merchant-console -----> domain
 acquirer-api ----------> domain
-future Cashu adapter --> domain
-future Stellar client -> stellar-settlement
+Cashu processor ------> stellar-settlement
+Horizon reader -------> stellar-settlement
+future payout signer --> stellar-settlement
 
 domain ----------------> no application or network framework
 stellar-settlement ----> no network client yet
@@ -125,9 +131,13 @@ String parsing must reject signs, exponents, separators, and more than two decim
 schemas must declare integer bounds. Stellar's native asset precision must not cause silent rounding
 into Cashu cents.
 
-## Planned Persistence
+## Persistence
 
-The database choice is intentionally deferred until invoice and recovery schemas are fixed. Persistence
+The settlement compatibility crate has a single-process, atomically replaced JSON journal to prove
+cursor, claim, prepared-envelope, and payout recovery across restart. It is not the production database
+or a multi-process coordination mechanism.
+
+The production database choice is deferred until invoice and recovery schemas are fixed. Persistence
 must provide atomic transitions for:
 
 - invoice state and accepted proof reservation;
@@ -157,3 +167,4 @@ justify it.
 - [ADR-0001: Hybrid workspace boundaries](adr/0001-hybrid-workspace.md)
 - [ADR-0002: Operator liabilities remain distinct](adr/0002-distinct-operator-liabilities.md)
 - [ADR-0003: Direct settlement precedes clearing](adr/0003-direct-settlement-before-clearing.md)
+- [ADR-0004: Stock CDK external processor for Stellar](adr/0004-stock-cdk-stellar-processor.md)

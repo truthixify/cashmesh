@@ -1,144 +1,188 @@
 # Experimental Cashu `stellar` Payment Method Profile
 
-**Status:** Draft for compatibility testing
+**Status:** Implemented for fixture-backed compatibility testing
 
 **Method identifier:** `stellar`
 
 **Initial unit:** `usdc`
 
-This document defines the intended boundary for a Cashu mint/melt payment method backed by a Stellar
-asset. It is not an accepted NUT and must not be represented as one. Exact field compatibility must be
-validated against the pinned CDK release before implementation is treated as interoperable.
+This document defines the CashMesh profile for a custom Cashu mint and melt method backed by Stellar
+USDC. It is not an accepted NUT and must not be represented as one. The implementation proves a stock
+CDK boundary and deterministic recovery behavior; it does not operate a funded mint or payout account.
 
-## Configuration
+## Pinned Compatibility Boundary
 
-Each operator must configure and expose one exact tuple:
+| Component | Exact version | Role |
+|---|---|---|
+| CDK | `0.18.0-rc.3` | Cashu mint payment interface |
+| CDK tag commit | `accdd95f1af76a6fdd067e7cbe0a3cc2e7a27693` | Reviewed upstream source identity |
+| `cdk-payment-processor` | `0.18.0-rc.3` | Stock external gRPC processor server |
+| `stellar-horizon` | `0.8.0` | Structured read-only Horizon adapter |
+| `stellar-base` | `0.7.0` | Horizon account request type |
+| `stellar-strkey` | `0.0.18` | G- and M-address validation |
+
+All direct versions are exact in `Cargo.toml`; transitive versions are fixed by `Cargo.lock`.
+`stellar-horizon` and `stellar-base` are community-maintained, so their use is isolated behind the
+deposit-source port. `stellar-strkey` is maintained by the Stellar Development Foundation.
+
+Stock `cdk-mintd` can connect to this processor through its `grpcprocessor` backend. The processor
+advertises `custom["stellar"]`, which causes stock CDK to register the custom mint and melt routes.
+The executable construction test passes the CashMesh backend directly to the stock
+`PaymentProcessorServer` type.
+
+CDK `0.18.0-rc.3` preserves the quote id and NUT-20 public key over gRPC, but its current proto does not
+carry the custom method name. The server reconstructs that field as an empty string while upstream
+work is tracked in CDK PR `#2275`. CashMesh therefore accepts either `stellar` or an empty method at
+this one-method endpoint. It must not multiplex another custom method onto the same endpoint until the
+method name is transmitted and tested.
+
+## Stellar Testnet Identity
+
+The compatibility fixture fixes this exact tuple:
 
 ```text
-network_passphrase
-asset_code
-asset_issuer
-cashu_unit
-minor_unit_scale
-deposit_destination_strategy
+network_passphrase = Test SDF Network ; September 2015
+network_id         = cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472
+horizon_url        = https://horizon-testnet.stellar.org
+asset_code         = USDC
+asset_issuer       = GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+cashu_unit         = usdc
+minor_unit_scale   = 2
 ```
 
-The initial profile fixes `cashu_unit=usdc` and `minor_unit_scale=2`, meaning one Cashu unit is one US
-cent. Network and issuer are never inferred from asset code alone.
+The network id is recomputed as SHA-256 of the passphrase. The Horizon adapter reads the root endpoint
+and requires the exact passphrase before reading payments. Asset code never implies issuer or network.
+
+One Cashu `usdc` unit is one US cent:
+
+```text
+1 unit   = USDC 0.01
+100 units = USDC 1.00
+```
+
+No floating-point value enters the accounting boundary. Stellar decimals are parsed to stroops and
+must equal the quoted cent amount exactly; sub-cent values, partial payments, and overpayments fail.
+The compatibility limits are 1 through 25,000 units inclusive.
 
 ## Capability Discovery
 
-The operator should advertise the custom method through NUT-06 using the method/unit pair supported by
-the pinned implementation. A conceptual capability is:
+The external processor reports unit `usdc` and a `stellar` custom-method settings object containing:
 
-```json
-{
-  "method": "stellar",
-  "unit": "usdc",
-  "min_amount": 1,
-  "max_amount": 25000
-}
-```
+- exact network id and passphrase;
+- exact asset code and issuer;
+- minor-unit scale;
+- minimum and maximum amount; and
+- `nut20_required=true`.
 
-The exact property names and optional fields remain subject to the compatibility spike. Wallets must
-not guess support from the mint name or reserve address.
+Wallets must discover the method from mint settings. They must not infer support from a mint name,
+reserve address, or asset code.
 
 ## Mint Quote
 
-The intended NUT-04 sequence is:
+The implemented NUT-04 adapter flow is:
 
-1. Wallet requests a `stellar` / `usdc` mint quote in integer minor units.
-2. Operator allocates a unique quote identifier, expiry, and deposit correlation value.
-3. Operator returns a signed SEP-0007 `web+stellar:pay` request.
-4. Wallet pays the exact allowlisted asset on the configured network.
-5. The observer validates and records the finalized transaction once.
-6. The Cashu mint marks the quote paid and blind-signs outputs bound by NUT-20 where supported.
+1. CDK supplies a mint-generated typed quote id, integer `usdc` amount, expiry, and NUT-20 pubkey.
+2. CashMesh rejects missing locks, zero or out-of-range amounts, expired quotes, and expiries more than
+   900 seconds after creation.
+3. CashMesh derives `base64(sha256(quote_id))` as a `MEMO_HASH` correlation value.
+4. The quote, amount, expiry, correlation, and lock are atomically persisted before a request returns.
+5. The adapter returns a deterministic `web+stellar:pay` URI with destination, decimal amount, exact
+   asset tuple, memo hash, memo type, and network passphrase.
+6. The observer validates one successful direct payment in a closed ledger and atomically persists the
+   claim, operation id, transaction hash, and paging cursor before reporting the quote paid.
 
-The SEP-0007 request must bind:
+The fixture request is unsigned. SEP-0007 origin-domain signatures require an origin domain and signing
+key; neither is introduced in this compatibility task. Quote expiry is returned in the CDK response
+and enforced against ledger close time because SEP-0007 has no standard payment-expiry parameter. The
+software must not claim that the URI itself signs or embeds expiry.
 
-- exact destination;
-- exact decimal amount derived from minor units;
-- asset code and issuer;
-- network passphrase;
-- unique memo or muxed destination;
-- quote expiry; and
-- origin-domain signature when the selected wallet flow relies on it.
+The initial observer accepts direct `payment` operations only. Path payments, account creation, and
+other payment-like operations advance the Horizon cursor but do not fund a quote. A transaction hash
+and an operation id can each fund at most one quote. This intentionally disallows batched mint deposits
+within one Stellar transaction.
 
-The observer must reject a transaction that is wrong-network, wrong-destination, wrong-asset,
-wrong-issuer, partial, overpaid, expired, replayed, or already claimed by another quote.
+## Deposit Finality and Cursor Rule
 
-## Deposit Finality
+For this profile, final means all of the following:
 
-The exact Horizon/RPC cursor and finality rule is intentionally unresolved. The compatibility spike must
-choose and record:
+- the verified Horizon endpoint reports the configured network passphrase;
+- the operation and joined transaction report matching transaction ids and hashes;
+- the joined transaction is successful and has a positive closed-ledger sequence;
+- the operation destination, asset code, issuer, memo, and amount match exactly; and
+- the ledger close time is no later than quote expiry.
 
-- the authoritative Stellar data source;
-- paging/cursor persistence behavior;
-- how a successful ledger close becomes final for this product;
-- restart behavior between observation and quote update; and
-- reconciliation against the operator reserve account.
+Stellar consensus produces one transaction set for a closed ledger, so the profile does not add a
+proof-of-work confirmation count. A successful historical Horizon transaction joined to a closed
+ledger is the product finality boundary.
 
-Issuance must never depend on an unpersisted callback or an in-memory cursor.
+Observations are processed in ascending paging-token order. Rejected relevant payments still advance
+the cursor atomically so they do not block ingestion. Late and malformed transfers require a separate
+manual recovery process and never authorize issuance automatically.
 
-## Melt Quote
+## Melt Quote and Payout
 
-The intended NUT-05 sequence is:
+The implemented NUT-05 adapter accepts the same strict SEP-0007 subset and validates destination,
+network, asset, integer-cent amount, limits, and duplicate parameters before persisting a melt record.
+It returns a zero rail fee for the fixture; production fee policy is not selected here.
 
-1. Wallet requests a `stellar` / `usdc` melt quote with destination and integer amount.
-2. Operator validates destination, network, asset, fees, limits, and expiry before reserving proofs.
-3. Proofs move to `proofs_reserved` before any Stellar submission.
-4. One settlement identifier creates at most one Stellar transaction effect.
-5. Submission records the transaction hash but does not mark the quote paid.
-6. A matching finalized transaction moves the quote to `paid` and consumes proofs.
-7. A provable pre-submission failure moves to `failed` and permits release.
-8. An ambiguous submitted outcome moves to `needs_attention`; proofs remain reserved.
+The recovery sequence is:
 
-The quote identifier is the default idempotency domain. If the pinned Cashu implementation requires a
-different stable key, that decision must be documented before code changes.
+1. Move `unpaid` to `proofs_reserved` before preparing any payout.
+2. Ask an external signer port for one exact signed envelope and transaction hash.
+3. Atomically persist that envelope and hash while proofs remain reserved.
+4. Persist `dispatch_started=true` before calling the network submission port.
+5. Observe the transaction hash before every possible submission or recovery action.
+6. Map accepted submission to `submitted`, matching final success to `paid`, authoritative rejection
+   to `failed`, and indeterminate outcome to `needs_attention`.
+7. Return CDK `PENDING` for reserved/submitted, `UNKNOWN` for manual attention, and nonzero total spent
+   only for `PAID`.
 
-## Merchant Payment Requests
+A crash before submission can retry the exact persisted envelope. A crash after an external effect
+observes the same hash before proceeding. Re-submitting an identical Stellar envelope cannot create a
+second transaction effect, while a different hash is a hard conflict. Once an ambiguous result is
+durably recorded, automatic calls observe only and never create another payout.
 
-CashMesh uses NUT-18 for receiver-initiated merchant requests. The acquirer will map:
+## Durable Journal Scope
 
-| NUT-18 concept | CashMesh use |
-|---|---|
-| Amount and unit | Integer invoice amount in `usdc` |
-| Accepted mints (`m`) | Merchant/acquirer operator allowlist |
-| Mint policy (`mp`) | Strict or advisory operator preference |
-| Supported melt methods (`sm`) | `stellar` settlement option and disclosed fee |
-| Transport | Wallet-to-acquirer delivery endpoint |
-| Locking | Recipient binding where compatible wallet support exists |
+The compatibility store writes a versioned JSON journal through write, file sync, atomic rename, and
+directory sync. The file is created with owner-only permissions on Unix. It proves restart behavior for
+one processor process.
 
-CashMesh-specific invoice metadata must not be placed into an extension field until collision,
-canonicalization, signing, and versioning behavior are specified.
+It is not a production multi-process database. It has no cross-process lock, encryption, backup policy,
+schema migration framework, or operator console. A signed envelope is dispatch-capable and is persisted
+to support recovery, so production storage must place it in an encrypted, access-controlled signing
+domain. The public debug implementations redact envelope bytes.
+
+The event stream is cancellation-aware but does not emit events in this spike. Stock CDK can poll the
+implemented incoming and outgoing status methods. A production observer should add durable event
+delivery without making an event callback the source of accounting truth.
 
 ## Error Categories
 
-Stable public errors should distinguish:
+Internal validation distinguishes unsupported method or unit, wrong network, wrong destination,
+wrong asset code, wrong issuer, amount mismatch, expiry, unknown correlation, stale cursor, operation
+replay, transaction replay, quote conflict, payout rejection, pending submission, and manual attention.
+Raw Horizon, CDK, filesystem, and signing details are not adopted as stable merchant-facing schemas.
 
-- unsupported method, unit, network, or asset;
-- invalid destination or memo;
-- amount outside limits;
-- expired quote;
-- payment not observed;
-- wrong or already claimed payment;
-- payout rejected before submission;
-- payout submitted and awaiting observation;
-- payout outcome requiring manual attention; and
-- operator suspended by merchant policy.
+## Not Yet Proven
 
-Raw Stellar, CDK, database, or infrastructure errors must not become stable public schemas by accident.
+- live testnet mint issuance through a running `cdk-mintd` process;
+- transaction construction, signing, or submission with a funded Stellar account;
+- origin-domain signing for SEP-0007 requests;
+- production database concurrency and encrypted envelope storage;
+- event-driven quote updates;
+- fees, late-payment return, or sub-cent recovery policy;
+- multiple operators sharing a clearing or settlement store; and
+- NUT-18 merchant invoice and proof acceptance.
 
-## Unresolved Decisions
+No mainnet transaction, funded testnet transaction, or public mint is authorized by this profile.
 
-- CDK release and external processor interface.
-- Stellar data source and finality rule.
-- SEP-0007 signature requirements and origin domain.
-- Memo versus muxed-account allocation.
-- Fee rounding and sub-cent handling.
-- Quote expiry and late-payment recovery.
-- NUT-20 support expectations.
-- NUT-18 transport and invoice binding.
+## References
 
-These decisions require fixtures and compatibility evidence; they must not be selected implicitly in
-production code.
+- [CDK `v0.18.0-rc.3` release](https://github.com/cashubtc/cdk/releases/tag/v0.18.0-rc.3)
+- [CDK custom-method gRPC work, PR #2275](https://github.com/cashubtc/cdk/pull/2275)
+- [Cashu NUT-01 units](https://github.com/cashubtc/nuts/blob/main/01.md)
+- [SEP-0007 URI scheme](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0007.md)
+- [Stellar network identities](https://developers.stellar.org/docs/networks)
+- [Stellar consensus protocol](https://developers.stellar.org/docs/learn/fundamentals/stellar-consensus-protocol)
+- [Circle testnet USDC addresses](https://developers.circle.com/stablecoins/usdc-contract-addresses)

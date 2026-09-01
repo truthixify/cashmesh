@@ -3,18 +3,19 @@
 CashMesh is an open merchant acquiring and settlement network for multi-operator Cashu e-cash on
 Stellar.
 
-The repository is at foundation stage. It currently contains a merchant operations console, a small
-acquirer API, shared operator-policy rules, and a Rust settlement state machine. It does **not** run a
-Cashu mint, connect to Stellar, persist merchant balances, or move funds.
+The repository contains a merchant operations console, a small acquirer API, shared operator-policy
+rules, and a fixture-backed Stellar payment processor for stock CDK `0.18.0-rc.3`. It does **not** run
+a public Cashu mint, sign or broadcast Stellar transactions, persist merchant balances, or move funds.
 
 ## Current Capabilities
 
 - Classify operators as trusted, convertible-only, or unlisted.
 - Force immediate conversion when an operator cannot be safely held.
 - Represent USDC amounts as integer minor units.
-- Reserve proofs before a payout effect.
-- Reject a second transaction hash for one settlement identifier.
-- Route ambiguous submitted effects to manual attention instead of declaring failure.
+- Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
+- Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
+- Persist a prepared payout before dispatch and recover without creating a second transaction effect.
+- Expose custom `stellar` mint and melt behavior through stock CDK payment-processor types.
 - Exercise the merchant workflow in an explicitly labeled testnet fixture console.
 
 ## Architecture
@@ -28,13 +29,13 @@ Merchant console ---> Acquirer API ---> Operator policy
                             |                  |
                             |                  +--> hold / convert / reject
                             v
-                 Cashu operator adapter       (planned)
+                 Cashu operator adapter       (fixture-backed)
                             |
                             v
-                 Stellar settlement adapter   (planned)
+                 Stellar settlement adapter   (read fixture / prepare payout)
                             |
                             v
-                     Stellar testnet
+                     Stellar testnet           (no broadcast)
 ```
 
 The domain package has no framework or network dependencies. Cashu, Stellar, storage, and delivery
@@ -47,7 +48,7 @@ frameworks adapt to it at the edges.
 | `apps/merchant-console/` | Next.js merchant operations reference client |
 | `services/acquirer-api/` | Fastify health and operator-policy API |
 | `packages/domain/` | Integer money and operator acceptance rules |
-| `crates/stellar-settlement/` | Rust settlement transition and recovery invariants |
+| `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |
 | `docs/` | Architecture, protocol, security, roadmap, development, and ADRs |
 
 ## Quick Start
@@ -69,8 +70,9 @@ pnpm check
 pnpm test:e2e
 ```
 
-See [development setup](docs/development.md), [architecture](docs/architecture.md), and the
-[roadmap](docs/roadmap.md) before implementing a network integration.
+See [development setup](docs/development.md), [architecture](docs/architecture.md), the
+[experimental protocol profile](docs/protocol-profile.md), and the [roadmap](docs/roadmap.md) before
+implementing a network integration.
 
 ## Safety
 

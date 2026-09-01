@@ -15,13 +15,14 @@ security, legal, liquidity, and partner evidence.
 
 ## Stellar Settlement
 
-**Status:** Planned
+**Status:** In progress
 
-- Experimental Cashu `stellar` mint and melt method profile.
-- External processor compatible with a pinned stock CDK release.
-- Exact Stellar testnet USDC asset validation.
-- Durable deposit cursor, finality, expiry, replay, and reconciliation rules.
-- At-most-once payout evidence across crash and restart.
+- Fixture-backed Cashu `stellar` mint and melt profile on CDK `0.18.0-rc.3`.
+- Stock external processor construction and documented single-method gRPC constraint.
+- Exact Stellar testnet network and Circle USDC tuple validation.
+- Atomic deposit cursor, finality, expiry, operation replay, and transaction replay evidence.
+- At-most-once payout evidence across ambiguity, crash, and restart.
+- Remaining: running `cdk-mintd` integration, testnet signing adapter, and production persistence.
 
 ## Merchant Acceptance
 

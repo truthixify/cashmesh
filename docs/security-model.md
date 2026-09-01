@@ -51,10 +51,10 @@ of Cashu or Stellar implementations.
 
 | Threat | Impact | Initial control |
 |---|---|---|
-| Replayed Stellar deposit | Unbacked issuance | Unique correlation value and claimed-transaction uniqueness |
+| Replayed Stellar deposit | Unbacked issuance | Quote-derived memo plus operation and transaction uniqueness |
 | Wrong asset or issuer | Unbacked issuance | Exact network/code/issuer allowlist |
 | Partial or rounded payment | Accounting loss | Integer quote amount and exact comparison |
-| Duplicate payout after timeout | Reserve loss | Stable idempotency key, persisted hash, observe-before-retry |
+| Duplicate payout after timeout | Reserve loss | Persisted exact envelope/hash, dispatch intent, observe-before-retry |
 | Proof release after ambiguous effect | Double redemption | `needs_attention` state and proof reservation |
 | Dishonest or insolvent operator | Merchant loss | Per-operator tiers, caps, conversion policy, suspension, diversification |
 | Forged merchant callback | Fulfillment without payment | Signed/replay-protected webhooks and merchant-side verification |
@@ -88,6 +88,15 @@ edge.
 - Use test-only keys that cannot control value when deterministic signatures are required.
 - Redact bearer tokens and complete payment requests from telemetry by default.
 - Treat database backups, dead-letter queues, and tracing systems as potential secret stores.
+- Treat a signed Stellar envelope as dispatch-capable data: encrypt it at rest and never include it in
+  debug output, telemetry, screenshots, or support artifacts.
+
+## Compatibility Store Boundary
+
+The current JSON journal uses atomic replacement and owner-only Unix permissions to test restart
+invariants. It is safe only for one processor process in an unfunded environment. It does not provide
+cross-process locking, encryption, access audit, backup recovery, or production migrations. Those are
+deployment gates, not optional hardening.
 
 ## Mainnet Gates
 

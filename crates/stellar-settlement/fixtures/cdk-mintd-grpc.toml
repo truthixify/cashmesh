@@ -1,0 +1,14 @@
+# Fragment for stock cdk-mintd 0.18.0-rc.3. The processor endpoint is local-only in this fixture.
+[[payment_backend]]
+backend = "grpcprocessor"
+unit = "usdc"
+min_mint = 1
+max_mint = 25000
+min_melt = 1
+max_melt = 25000
+
+[grpc_processor]
+supported_units = ["usdc"]
+address = "127.0.0.1"
+port = 50051
+allow_insecure = true
