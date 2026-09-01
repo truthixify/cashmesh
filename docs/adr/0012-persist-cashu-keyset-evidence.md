@@ -70,5 +70,5 @@ or make payment acceptance successful in this capability.
 
 Define scheduler ownership, observation cadence, retention, and alerting before automatic refresh is
 enabled. Add authenticated key reads only after NUT-21 or NUT-22 credential storage and request
-isolation are designed. NUT-07 state evidence, encrypted proof reservation, paid-invoice accounting,
+isolation are designed. NUT-07 state evidence, encrypted bearer-proof custody, paid-invoice accounting,
 and redemption remain separate security boundaries.

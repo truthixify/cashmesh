@@ -61,3 +61,9 @@ export {
   MAX_NUT18_OPERATORS,
   type Nut18MintPolicy,
 } from "./payment-request";
+export {
+  CashuProofReferenceError,
+  type CashuProofReferenceInputV1,
+  type CashuProofReferenceV1,
+  createCashuProofReferenceV1,
+} from "./proof-reference";

@@ -23,6 +23,7 @@ merchant balances, or move funds.
 - Validate proof signatures and exact mixed-keyset input fees against explicit offline snapshots.
 - Observe unit-scoped NUT-01/02 keysets through a bounded, rotation-aware HTTPS client.
 - Persist append-only keyset identities and observations with collision and freshness checks.
+- Derive and durably reserve non-spendable NUT-07 proof references without retaining bearer proofs.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -58,9 +59,9 @@ frameworks adapt to it at the edges.
 | Path | Responsibility |
 |---|---|
 | `apps/merchant-console/` | Next.js merchant operations reference client |
-| `services/acquirer-api/` | Fastify policy, durable invoice API, and Cashu keyset evidence store |
+| `services/acquirer-api/` | Fastify policy, durable invoice API, keyset evidence, and proof-reference reservation |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
-| `packages/cashu/` | NUT-18, bounded keyset observation, proof-integrity, and fee adapter plus interoperability fixture |
+| `packages/cashu/` | NUT-18, bounded keyset observation, proof-integrity, fee, and proof-reference adapter plus interoperability fixture |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |
 | `docs/` | Architecture, protocol, security, roadmap, development, and ADRs |
 

@@ -17,14 +17,49 @@ import { describe, expect, it } from "vitest";
 import {
   type CashuKeysetSnapshotEntryInputV1,
   CashuKeysetSnapshotError,
+  CashuProofReferenceError,
   CashuProofValidationError,
   createCashuKeysetSnapshotV1,
+  createCashuProofReferenceV1,
   validateCashuPaymentProofsV1,
 } from "../src";
 
 const INVOICE_ID = "invoice-proof-validation-001";
 const MINT_URL = "https://mint.cashmesh.example";
 const NOW = 1_788_100_000;
+
+describe("createCashuProofReferenceV1", () => {
+  it("accepts only a canonical non-bearer NUT-07 proof reference", () => {
+    const reference = createCashuProofReferenceV1({
+      amount: 8,
+      keysetId: "000f715baf5d4c2e",
+      y: "0239bcd9b5df9a0fcc2aae3b352954b7cfd020d2b01842a4dee62edac0f8b8cd05",
+    });
+
+    expect(reference).toEqual({
+      amount: 8,
+      keysetId: "000f715baf5d4c2e",
+      y: "0239bcd9b5df9a0fcc2aae3b352954b7cfd020d2b01842a4dee62edac0f8b8cd05",
+    });
+    expect(Object.isFrozen(reference)).toBe(true);
+    expect(JSON.stringify(reference)).not.toMatch(/secret|signature|dleq|witness/i);
+  });
+
+  it.each([
+    { amount: 0, keysetId: "000f715baf5d4c2e", name: "zero amount", y: `02${"11".repeat(32)}` },
+    { amount: 1, keysetId: "bad-keyset", name: "invalid keyset", y: `02${"11".repeat(32)}` },
+    {
+      amount: 1,
+      keysetId: "000f715baf5d4c2e",
+      name: "invalid curve point",
+      y: `02${"ff".repeat(32)}`,
+    },
+  ])("rejects $name", ({ amount, keysetId, y }) => {
+    expect(() => createCashuProofReferenceV1({ amount, keysetId, y })).toThrow(
+      CashuProofReferenceError,
+    );
+  });
+});
 
 describe("createCashuKeysetSnapshotV1", () => {
   it("canonicalizes and deeply freezes a verified mint keyset snapshot", () => {
@@ -200,11 +235,30 @@ describe("validateCashuPaymentProofsV1", () => {
       mintUrl: MINT_URL,
       netAmount: 27,
       proofCount: 3,
+      proofReferences: [
+        {
+          amount: 8,
+          keysetId: first.entry.id,
+          y: "0239bcd9b5df9a0fcc2aae3b352954b7cfd020d2b01842a4dee62edac0f8b8cd05",
+        },
+        {
+          amount: 4,
+          keysetId: first.entry.id,
+          y: "02ab1c4a13001bbc881cf2d568048d414008ac94e0bde1cb05e96076553b1edcd5",
+        },
+        {
+          amount: 16,
+          keysetId: second.entry.id,
+          y: "02b79a5775181e7973cab6c33eea75d943d9974acefd4d2a267f0f76ef567915ff",
+        },
+      ],
       unit: "usdc",
       validatedAt: NOW,
     });
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.keysetIds)).toBe(true);
+    expect(Object.isFrozen(result.proofReferences)).toBe(true);
+    expect(Object.isFrozen(result.proofReferences[0])).toBe(true);
     expect(JSON.stringify(result)).not.toContain("test-only-proof");
     expect(JSON.stringify(result)).not.toContain(proofs[0]?.C ?? "missing-signature");
     expect(JSON.stringify(result)).not.toContain(proofs[0]?.dleq?.r ?? "missing-dleq");

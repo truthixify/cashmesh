@@ -38,7 +38,8 @@ security, legal, liquidity, and partner evidence.
 - Implemented: explicit keyset snapshots, strict offline DLEQ validation, and exact NUT-02 input fees.
 - Implemented: bounded, unit-scoped NUT-01/02 observation with stable two-pass metadata reads.
 - Implemented: durable keyset identity, collision history, observation replay, and freshness lookup.
-- Remaining: atomic paid-invoice, proof-reservation, and balanced-journal persistence.
+- Implemented: durable local proof-reference reservation with restart and concurrency safety.
+- Remaining: reservation lifecycle plus atomic paid-invoice and balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
 - Remaining: protected-mint authentication, NUT-07 state, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.

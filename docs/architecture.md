@@ -53,8 +53,9 @@ It validates proof integrity and input fees against an explicit, versioned publi
 performing network I/O during proof validation. A separate source port and bounded HTTPS adapter can
 collect one unit's NUT-01 and NUT-02 data, reject a rotation between two metadata reads, and pass the
 joined result through the same snapshot validator. It owns Cashu wire encoding, endpoint normalization,
-transport-size limits, and versioned policy records. It does not persist snapshots, observe spent state,
-or decide that an invoice has been paid.
+transport-size limits, versioned policy records, and derivation of sanitized NUT-07 proof references.
+It does not persist snapshots or references, observe spent state, or decide that an invoice has been
+paid.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -74,8 +75,10 @@ The adapter pins a current release-candidate cashu-ts version behind this bounda
 - manual-attention workflows.
 
 The API exposes health, operator-policy evaluation, durable open-invoice plus strict NUT-18 request
-creation and lookup, and a non-accepting payment-envelope endpoint. Authentication, proof acceptance,
-and terminal invoice transitions are not yet implemented.
+creation and lookup, and a non-accepting payment-envelope endpoint. Its storage adapters also persist
+append-only keyset evidence and local non-bearer proof-reference reservations. Those adapters are not
+wired into the endpoint. Authentication, proof acceptance, and terminal invoice transitions are not
+yet implemented.
 
 ### Merchant Console
 
@@ -173,16 +176,18 @@ or a multi-process coordination mechanism.
 
 PostgreSQL is selected for acquirer persistence. The implemented migrations store open invoice
 issuance, merchant-scoped idempotency, encoded Cashu requests, normalized operator-policy routes, and
-append-only Cashu keyset evidence. Database constraints require the reservation, invoice, request,
-and at least one accepted route to commit together. A separate keyset repository preserves immutable
-identity across operators, records activity per observation, and retrieves only observations inside a
-caller-supplied freshness interval. Both repositories reconstruct stored records through validated
-adapters before return. See the [merchant invoice API](invoice-api.md) for request and replay semantics.
+append-only Cashu keyset evidence and proof references. Database constraints require the invoice-creation
+reservation, invoice, request, and at least one accepted route to commit together. A separate keyset
+repository preserves immutable identity across operators, records activity per observation, and retrieves
+only observations inside a caller-supplied freshness interval. The proof-reference repository binds an
+exact observation and issued operator route, then enforces one local claim per `(mint URL, Y)` across
+restarts and concurrent workers. Repositories reconstruct stored records through validated adapters
+before return. See the [merchant invoice API](invoice-api.md) for request and replay semantics.
 
 Later migrations must preserve the fixed invoice and recovery contracts and provide atomic transitions
 for:
 
-- invoice state and accepted proof reservation;
+- proof-reservation lifecycle and terminal invoice state;
 - one idempotency key to one external payout attempt;
 - merchant ledger debit/credit pairs;
 - webhook delivery attempts; and
@@ -218,3 +223,4 @@ justify it.
 - [ADR-0010: Offline Cashu proof validation](adr/0010-validate-cashu-proofs-offline.md)
 - [ADR-0011: Bounded Cashu keyset observation](adr/0011-observe-cashu-keysets.md)
 - [ADR-0012: Durable Cashu keyset evidence](adr/0012-persist-cashu-keyset-evidence.md)
+- [ADR-0013: Durable Cashu proof references](adr/0013-reserve-cashu-proof-references.md)

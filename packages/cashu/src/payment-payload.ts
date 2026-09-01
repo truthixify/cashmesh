@@ -1,13 +1,16 @@
 import { type InvoiceId, invoiceId, type UnixTimestamp, unixTimestamp } from "@cashmesh/domain";
 import {
+  hashToCurve,
   PaymentRequest,
   type PaymentRequestPayload,
   type Proof,
+  pointToHex,
   verifyProofsForReceive,
 } from "@cashu/cashu-ts";
 
 import { type CashuKeysetSnapshotV1, createCashuKeysetSnapshotV1 } from "./keyset-snapshot";
 import { normalizeCashuMintUrl } from "./mint-url";
+import { type CashuProofReferenceV1, createCashuProofReferenceV1 } from "./proof-reference";
 
 export const MAX_NUT18_PAYMENT_PAYLOAD_BYTES = 65_536;
 export const MAX_NUT18_PAYMENT_PROOFS = 128;
@@ -40,6 +43,7 @@ export interface ValidatedCashuPaymentProofsV1 extends CashuPaymentPayloadEnvelo
   readonly keysetIds: readonly string[];
   readonly keysetSnapshotObservedAt: UnixTimestamp;
   readonly netAmount: number;
+  readonly proofReferences: readonly CashuProofReferenceV1[];
   readonly validatedAt: UnixTimestamp;
 }
 
@@ -168,6 +172,7 @@ export function validateCashuPaymentProofsV1(
     inputFeePpk += BigInt(keyset.inputFeePpk);
   }
 
+  let proofReferences: CashuProofReferenceV1[];
   try {
     verifyProofsForReceive(
       payload.proofs,
@@ -183,6 +188,26 @@ export function validateCashuPaymentProofsV1(
       },
       { requireDleq: true },
     );
+    const proofYs = new Set<string>();
+    proofReferences = payload.proofs.map((proof) => {
+      const y = pointToHex({
+        kind: "secp",
+        pt: hashToCurve(TEXT_ENCODER.encode(proof.secret)),
+      });
+      if (proofYs.has(y)) {
+        throw new CashuProofValidationError(
+          "duplicate_proof",
+          "Cashu payment contains a duplicate proof.",
+        );
+      }
+      proofYs.add(y);
+      return createCashuProofReferenceV1({
+        amount: Number(proof.amount.toBigInt()),
+        keysetId: proof.id,
+        y,
+      });
+    });
+    proofReferences.sort((left, right) => (left.y < right.y ? -1 : left.y > right.y ? 1 : 0));
   } catch (error) {
     if (error instanceof CashuProofValidationError) {
       throw error;
@@ -208,6 +233,7 @@ export function validateCashuPaymentProofsV1(
     keysetIds: Object.freeze([...usedKeysetIds].sort()),
     keysetSnapshotObservedAt: keysetSnapshot.observedAt,
     netAmount: Number(grossAmount - inputFee),
+    proofReferences: Object.freeze(proofReferences),
     validatedAt,
   });
 }

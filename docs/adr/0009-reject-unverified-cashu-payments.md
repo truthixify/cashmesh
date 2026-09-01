@@ -29,9 +29,9 @@ server clock against `[createdAt, expiresAt)`, exact unit, strict mint allowlist
 insufficient condition that gross proof value is at least the invoice amount.
 
 Every request remains non-accepting. A payload that passes these checks returns
-`503 proof_validation_unavailable`; no path returns 2xx, reserves a proof, calls an operator, changes
-invoice state, or credits a merchant. Parser and semantic failures return explicit non-success statuses
-without echoing payload data.
+`503 proof_validation_unavailable`; no HTTP path returns 2xx, reserves a proof, calls an operator,
+changes invoice state, or credits a merchant. Parser and semantic failures return explicit non-success
+statuses without echoing payload data.
 
 ## Consequences
 
@@ -43,8 +43,9 @@ without echoing payload data.
   fees and keyset data are not loaded.
 - A wallet integration can exercise delivery and rejection behavior, but no locally issued request is
   payable yet.
-- The next acceptance capability must durably reserve proof secrets before any network effect and
-  atomically commit verified payment, invoice state, and the balanced merchant journal.
+- A future acceptance capability must combine a local proof-reference lock with encrypted bearer
+  custody before any network effect, then atomically commit verified payment, invoice state, and the
+  balanced merchant journal.
 
 ## Revisit When
 
@@ -55,3 +56,6 @@ interoperability evidence.
 
 ADR-0010 adds deterministic offline keyset, DLEQ, and input-fee validation without changing this
 endpoint's terminal rejection.
+
+ADR-0013 adds a separate internal non-bearer proof-reference repository without changing this endpoint's
+terminal rejection or creating an HTTP reservation path.

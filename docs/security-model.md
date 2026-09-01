@@ -82,6 +82,7 @@ of Cashu or Stellar implementations.
 | Key rotation during observation | Inconsistent activity, fee, expiry, and public-key evidence | Two matching metadata reads around unit-scoped key collection |
 | Historical keyset ID reuse | Substituted keys, unit, fee, or expiry after prior acceptance | Cross-operator immutable identity fingerprints and append-only observations |
 | Duplicate proof inside one payload | Inflated gross amount | Reject duplicate secrets before amount or fee acceptance |
+| Same proof presented to concurrent payments | Conflicting operator effects or double fulfillment | Unique local `(mint URL, Y)` reservation in one database transaction |
 | Dust proof fee exhaustion | Merchant receives less redeemable value than invoiced | Mixed-keyset NUT-02 fee calculation with integer round-up |
 | Stale or replayed NUT-18 request | Payment against an invalid invoice | Server-side invoice lookup, half-open expiry check, and unique payment reservation |
 | Unsafe request endpoint | Credential leakage or payer redirection | Normalized HTTPS URLs without credentials, queries, or fragments |
@@ -100,6 +101,8 @@ CashMesh does not hide everything:
 - Operators see quote amount, time, completion, and redemption details.
 - The acquirer sees merchant, invoice, amount, operator, and settlement state.
 - A NUT-18 request reveals its invoice identifier, amount, accepted mints, and transport endpoint.
+- Stored NUT-07 `Y` references can correlate repeated presentation attempts even though they cannot
+  spend a proof.
 - Network and application metadata can correlate parties.
 - Exact amounts and timing can correlate entry and exit.
 - Stablecoin issuer controls remain in force.
@@ -127,10 +130,10 @@ deployment gates, not optional hardening.
 
 ## Acquirer Database Boundary
 
-PostgreSQL now stores open invoices, idempotency fingerprints, and public Cashu keyset evidence.
-Database constraints repeat identifier, amount, unit, schema, ownership, expiry-shape, and evidence
-cardinality invariants. Concurrent invoice creation is serialized by a unique merchant/key
-reservation, and invoice plus reservation commit together.
+PostgreSQL now stores open invoices, idempotency fingerprints, public Cashu keyset evidence, and
+non-spendable proof references. Database constraints repeat identifier, amount, unit, schema, ownership,
+expiry-shape, and evidence-cardinality invariants. Concurrent invoice creation is serialized by a
+unique merchant/key reservation, and invoice plus reservation commit together.
 
 The same transaction stores the strict Cashu request and one through 16 operator routes. Deferred
 constraints prevent a request with no accepted route. Reads reconstruct the request through the pinned
@@ -145,8 +148,8 @@ requests, proof payloads, or operator credentials.
 
 The NUT-18 POST route parses at most 64 KiB and 128 proofs from raw JSON, projects only non-secret
 envelope metadata, and binds it to the stored invoice request. It always rejects after these checks.
-No bearer proof is persisted or considered reserved, and no successful response exists until proof
-validation and accounting can commit atomically.
+That route persists nothing and no successful response exists until proof validation and accounting can
+commit atomically.
 
 The Cashu adapter can validate standard `00` and `01` keysets, strict DLEQ evidence, and exact input
 fees from an explicit public snapshot. It accepts inactive keysets before final expiry but rejects
@@ -159,6 +162,13 @@ automatic observer schedule and is not connected to payment acceptance. Offline 
 establish NUT-07 state, and NUT-21 and NUT-22 credentials are not handled. The adapter and keyset store
 return no bearer fields. A received NUT-12 blinding factor must never be logged, persisted outside
 encrypted proof custody, or forwarded to the mint, where it would reveal an issuance-to-spend link.
+
+After offline validation, a separate repository can reserve only `Y`, keyset ID, and amount. The
+reservation is bound to an issued invoice/operator/mint route and exact keyset observation, commits all
+proof references atomically, and makes `(mint URL, Y)` unique across payments. It deliberately stores no
+secret, signature, DLEQ value, witness, memo, or raw payload. It is append-only and has no release,
+consumption, NUT-07, operator-effect, invoice-transition, journal, or HTTP-success behavior. `Y` remains
+correlation-sensitive and is excluded from telemetry and merchant-facing responses.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

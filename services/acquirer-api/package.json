@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "test": "vitest run",
-    "test:integration": "vitest run test/postgres-invoice-repository.test.ts",
+    "test": "vitest run --no-file-parallelism",
+    "test:integration": "vitest run --no-file-parallelism test/postgres-invoice-repository.test.ts test/postgres-cashu-proof-reservation-repository.test.ts",
     "typecheck": "tsc --project tsconfig.json"
   },
   "dependencies": {

@@ -1,8 +1,8 @@
 # Cashu Merchant Payment Requests
 
 **Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, offline
-proof-integrity validation, and bounded public-key observation implemented; durable operator state and
-payment acceptance not implemented
+proof-integrity validation, bounded public-key observation, durable keyset evidence, and local
+proof-reference reservation implemented; operator effects and payment acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -118,13 +118,14 @@ inputs before their final expiry because NUT-02 requires mints to accept old pro
 
 Input fees are calculated across the proof set with exact integer arithmetic using the NUT-02 formula,
 then subtracted from gross value once. The immutable result contains gross, input fee, net, proof count,
-used keyset IDs, mint, unit, invoice ID, snapshot time, and validation time. It contains no secret,
-signature, DLEQ, witness, or memo.
+used keyset IDs, mint, unit, invoice ID, snapshot time, validation time, and one canonical reference per
+proof. Each reference contains only the amount, keyset ID, and NUT-07 `Y = hash_to_curve(secret)`. The
+result contains no secret, signature, DLEQ, witness, or memo.
 
 NUT-12's proof-side DLEQ includes the payer's blinding factor. It is needed for receiver-side
 verification but must not be sent back to the mint because that would reveal the link between issuance
 and spend. The metadata-only return prevents accidental forwarding in this capability; future proof
-reservation and operator adapters must preserve the same boundary.
+custody and operator adapters must preserve the same boundary.
 
 This function is not wired into the HTTP route yet. A snapshot is unauthenticated observation evidence,
 not a freshness guarantee, and offline cryptography cannot establish NUT-07 `UNSPENT` state. The public
@@ -156,6 +157,24 @@ scope-and-time repeat as idempotent, and exposes only the latest snapshot inside
 inclusive freshness bounds. The observer is not scheduled and this store is not wired to payment
 acceptance.
 
+## Local Proof-Reference Reservation
+
+The acquirer can separately persist a local reservation after successful offline validation. It binds
+one payment ID to the issued invoice, exact operator/mint route, unit, reservation time, gross amount,
+the exact keyset observation time, and a sorted set of proof references. Every referenced keyset must
+occur in that operator observation. The caller remains responsible for selecting the observation through
+an explicit freshness policy; the reservation does not infer one.
+
+PostgreSQL permits only one reservation for a `(mint URL, Y)` pair. Exact payment retries replay the
+stored record, changed terms under one payment ID fail, and competing payments cannot claim the same
+proof reference. The header and all references commit together, remain append-only across restart, and
+contain no secret, signature, DLEQ value, witness, memo, or raw payload.
+
+This is a sticky local lock, not a payment state. It has no release or consumption transition, does not
+call NUT-07 or an operator, does not retain spendable proof material, and cannot change an invoice or
+enable HTTP success. `Y` is non-spendable but correlation-sensitive and must not enter logs, metrics,
+support artifacts, or merchant responses.
+
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
 and support artifacts. Avoid putting customer identity or secrets into invoice identifiers or URLs.
@@ -174,10 +193,10 @@ operator redemption, or merchant settlement. Separate proof tests cover an offic
 deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. Keyset
 observer tests cover stable two-pass metadata, unit filtering, concurrency, response bounds, transport
 timeouts, and failure paths entirely through local fixtures. PostgreSQL tests cover restart,
-historical collision rejection, freshness bounds, concurrent replay, append-only enforcement, and
-stored-record corruption. They do not prove endpoint authenticity, an appropriate production
-freshness policy, unspentness, redemption, or merchant settlement. Do not present a locally issued
-fixture request as payable.
+historical collision rejection, freshness bounds, exact keyset-observation binding, concurrent replay,
+proof-reference exclusion, append-only enforcement, rollback, and stored-record corruption. They do not
+prove endpoint authenticity, an appropriate production freshness policy, unspentness, redemption, or
+merchant settlement. Do not present a locally issued fixture request as payable.
 
 ## References
 

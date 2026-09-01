@@ -60,10 +60,10 @@ write a journal, or enable the HTTP success path in this capability.
   still does not authenticate the operator or prove current availability.
 - The validation result proves signature integrity and fee arithmetic only. It is not evidence of
   unspentness, reservation, redemption, operator solvency, or merchant payment.
-- A future reservation layer must keep bearer material encrypted and must strip DLEQ data before any
+- Any future operator adapter that retains bearer material must encrypt it and strip DLEQ data before a
   proof is submitted to its mint.
 - The public payment endpoint continues to return `503 proof_validation_unavailable` after envelope
-  checks because no keyset provider or proof reservation is wired into it.
+  checks because keyset selection and proof reservation are not wired into it.
 
 ## Revisit When
 
@@ -71,3 +71,7 @@ Add a bounded operator keyset client and durable snapshot store with collision h
 policy, and restart tests. Then combine NUT-07 observation, atomic local proof reservation, operator
 swap or melt behavior, invoice transition, and balanced accounting before any successful payment
 response. Review standardized BLS support independently before accepting another keyset version.
+
+ADR-0013 subsequently extends the sanitized validation result with amount, keyset ID, and NUT-07 `Y`
+references and adds a separate local reservation repository. It does not change this decision's
+unspentness, bearer-custody, or HTTP-success limitations.

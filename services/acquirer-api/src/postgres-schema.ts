@@ -429,6 +429,218 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 3,
   }),
+  Object.freeze({
+    name: "reserve_cashu_proof_references",
+    sql: `
+      ALTER TABLE invoice_cashu_request_operators
+        ADD CONSTRAINT invoice_cashu_operators_route_unique
+        UNIQUE (invoice_id, operator_id, mint_url);
+
+      CREATE TABLE cashu_proof_reservations (
+        payment_id VARCHAR(128) PRIMARY KEY,
+        reservation_fingerprint CHAR(64) NOT NULL UNIQUE,
+        invoice_id VARCHAR(128) NOT NULL,
+        operator_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        unit VARCHAR(32) NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        keyset_observed_at BIGINT NOT NULL,
+        reserved_at BIGINT NOT NULL,
+        gross_amount BIGINT NOT NULL,
+        CONSTRAINT cashu_proof_reservations_payment_mint_unit_unique UNIQUE (
+          payment_id,
+          mint_url,
+          unit
+        ),
+        CONSTRAINT cashu_proof_reservations_payment_id CHECK (
+          payment_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_proof_reservations_fingerprint CHECK (
+          reservation_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_proof_reservations_invoice_id CHECK (
+          invoice_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_proof_reservations_operator_id CHECK (
+          operator_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_proof_reservations_mint_url CHECK (
+          mint_url ~ '^https://[^[:space:]]+$'
+        ),
+        CONSTRAINT cashu_proof_reservations_unit CHECK (
+          unit ~ '^[a-z0-9][a-z0-9._:-]*$'
+        ),
+        CONSTRAINT cashu_proof_reservations_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_proof_reservations_keyset_observed_at CHECK (
+          keyset_observed_at >= 0
+          AND keyset_observed_at <= reserved_at
+          AND keyset_observed_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_proof_reservations_reserved_at CHECK (
+          reserved_at >= 0 AND reserved_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_proof_reservations_gross_amount CHECK (
+          gross_amount > 0 AND gross_amount <= 9007199254740991
+        ),
+        CONSTRAINT cashu_proof_reservations_invoice_fkey
+          FOREIGN KEY (invoice_id)
+          REFERENCES merchant_invoices (id)
+          ON DELETE RESTRICT,
+        CONSTRAINT cashu_proof_reservations_route_fkey
+          FOREIGN KEY (invoice_id, operator_id, mint_url)
+          REFERENCES invoice_cashu_request_operators (invoice_id, operator_id, mint_url)
+          ON DELETE RESTRICT
+      );
+
+      CREATE INDEX cashu_proof_reservations_invoice_idx
+        ON cashu_proof_reservations (invoice_id, reserved_at, payment_id);
+
+      CREATE TABLE cashu_reserved_proofs (
+        payment_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        unit VARCHAR(32) NOT NULL,
+        position SMALLINT NOT NULL,
+        proof_y CHAR(66) NOT NULL,
+        keyset_id VARCHAR(66) NOT NULL,
+        amount BIGINT NOT NULL,
+        CONSTRAINT cashu_reserved_proofs_pkey PRIMARY KEY (payment_id, position),
+        CONSTRAINT cashu_reserved_proofs_mint_y_unique UNIQUE (mint_url, proof_y),
+        CONSTRAINT cashu_reserved_proofs_payment_y_unique UNIQUE (payment_id, proof_y),
+        CONSTRAINT cashu_reserved_proofs_position CHECK (
+          position >= 0 AND position < 128
+        ),
+        CONSTRAINT cashu_reserved_proofs_y CHECK (
+          proof_y ~ '^(02|03)[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_reserved_proofs_keyset_id CHECK (
+          keyset_id ~ '^(00[0-9a-f]{14}|01[0-9a-f]{64})$'
+        ),
+        CONSTRAINT cashu_reserved_proofs_amount CHECK (
+          amount > 0 AND amount <= 9007199254740991
+        ),
+        CONSTRAINT cashu_reserved_proofs_reservation_fkey
+          FOREIGN KEY (payment_id, mint_url, unit)
+          REFERENCES cashu_proof_reservations (payment_id, mint_url, unit)
+          ON DELETE RESTRICT,
+        CONSTRAINT cashu_reserved_proofs_keyset_fkey
+          FOREIGN KEY (mint_url, keyset_id, unit)
+          REFERENCES cashu_keysets (mint_url, keyset_id, unit)
+          ON DELETE RESTRICT
+      );
+
+      CREATE FUNCTION cashmesh_reject_cashu_proof_reservation_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Cashu proof reservations are append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER cashu_proof_reservations_append_only
+        BEFORE UPDATE OR DELETE ON cashu_proof_reservations
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_proof_reservation_mutation();
+
+      CREATE TRIGGER cashu_reserved_proofs_append_only
+        BEFORE UPDATE OR DELETE ON cashu_reserved_proofs
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_proof_reservation_mutation();
+
+      CREATE FUNCTION cashmesh_validate_cashu_proof_reservation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        reservation_payment_id VARCHAR(128);
+        reservation_record cashu_proof_reservations%ROWTYPE;
+        invoice_record merchant_invoices%ROWTYPE;
+        proof_count BIGINT;
+        proof_total NUMERIC;
+        maximum_position SMALLINT;
+      BEGIN
+        IF TG_TABLE_NAME = 'cashu_proof_reservations' THEN
+          reservation_payment_id := NEW.payment_id;
+        ELSIF TG_OP = 'DELETE' THEN
+          reservation_payment_id := OLD.payment_id;
+        ELSE
+          reservation_payment_id := NEW.payment_id;
+        END IF;
+
+        SELECT * INTO reservation_record
+        FROM cashu_proof_reservations
+        WHERE payment_id = reservation_payment_id;
+
+        IF NOT FOUND THEN
+          RETURN NULL;
+        END IF;
+
+        SELECT * INTO invoice_record
+        FROM merchant_invoices
+        WHERE id = reservation_record.invoice_id;
+
+        IF NOT FOUND
+          OR invoice_record.state <> 'open'
+          OR invoice_record.unit <> reservation_record.unit
+          OR reservation_record.reserved_at < invoice_record.created_at
+          OR reservation_record.reserved_at >= invoice_record.expires_at
+        THEN
+          RAISE EXCEPTION 'Cashu proof reservation requires an open invoice window'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        SELECT COUNT(*), COALESCE(SUM(amount), 0), MAX(position)
+          INTO proof_count, proof_total, maximum_position
+        FROM cashu_reserved_proofs
+        WHERE payment_id = reservation_payment_id;
+
+        IF proof_count = 0
+          OR proof_count > 128
+          OR maximum_position <> proof_count - 1
+          OR proof_total <> reservation_record.gross_amount
+        THEN
+          RAISE EXCEPTION 'Cashu proof reservation entries are incomplete or inconsistent'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        IF EXISTS (
+          SELECT 1
+          FROM cashu_reserved_proofs AS proof
+          WHERE proof.payment_id = reservation_payment_id
+            AND NOT EXISTS (
+              SELECT 1
+              FROM cashu_keyset_observations AS observation
+              JOIN cashu_keyset_observation_entries AS entry
+                ON entry.snapshot_fingerprint = observation.snapshot_fingerprint
+              WHERE observation.operator_id = reservation_record.operator_id
+                AND observation.mint_url = reservation_record.mint_url
+                AND observation.unit = reservation_record.unit
+                AND observation.observed_at = reservation_record.keyset_observed_at
+                AND entry.keyset_id = proof.keyset_id
+            )
+        ) THEN
+          RAISE EXCEPTION 'Cashu proof reservation lacks matching keyset observation evidence'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER cashu_proof_reservations_valid
+        AFTER INSERT OR UPDATE ON cashu_proof_reservations
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_proof_reservation();
+
+      CREATE CONSTRAINT TRIGGER cashu_reserved_proofs_valid
+        AFTER INSERT OR UPDATE OR DELETE ON cashu_reserved_proofs
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_proof_reservation();
+    `,
+    version: 4,
+  }),
 ]);
 
 export async function applyPostgresMigrations(client: PoolClient): Promise<void> {

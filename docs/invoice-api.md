@@ -1,12 +1,13 @@
 # Merchant Invoice API
 
-**Status:** Open-invoice and strict Cashu request issuance implemented; payment acceptance not
-implemented
+**Status:** Open-invoice issuance and internal proof-reference reservation implemented; payment
+acceptance not implemented
 
 The acquirer API persists version `1` USDC invoices in PostgreSQL and requires a merchant-scoped
 idempotency key for every creation request. It can inspect and bind a NUT-18 payment envelope, but it
-does not yet authenticate merchants, validate or reserve Cashu proofs, or transition invoices out of
-`open`.
+does not yet authenticate merchants, validate proofs in the HTTP path, or transition invoices out of
+`open`. A separate repository can reserve sanitized proof references after offline validation; it is
+not connected to the public endpoint.
 
 ## Create an Invoice
 
@@ -152,8 +153,9 @@ lists the normalized mint, and is not definitely underpaid before input fees. It
 A matching envelope returns `503 proof_validation_unavailable`; no proof is stored, reserved, spent,
 or submitted to an operator.
 
-The Cashu package has a deterministic offline proof validator, but the API has no trusted keyset
-provider, durable snapshot store, NUT-07 observer, or proof reservation yet. That library capability is
+The Cashu package has a deterministic offline proof validator, and separate acquirer repositories can
+load explicit keyset observations and reserve sanitized proof references. The HTTP service does not
+orchestrate them and has no NUT-07 observer or reservation lifecycle. Those internal capabilities are
 therefore intentionally not enough to change the endpoint response.
 
 | Status | Meaning |
@@ -174,7 +176,7 @@ official `postgres:18.6-alpine3.23` image pinned to manifest digest
 forward-only migrations under a PostgreSQL transaction-scoped advisory lock and refuses an unknown
 migration version or name.
 
-The invoice, Cashu request, and keyset-evidence migrations enforce:
+The invoice, Cashu request, keyset-evidence, and proof-reference migrations enforce:
 
 - globally unique invoice identifiers;
 - one creation record per merchant/idempotency key and one key per invoice;
@@ -186,19 +188,26 @@ The invoice, Cashu request, and keyset-evidence migrations enforce:
   policy tuples, HTTPS endpoints, and a URL-safe `creqA` shape;
 - reconstruction of stored request bytes through the pinned adapter before returning a record;
 - one immutable identity per normalized mint URL and keyset ID, even across operator configurations;
-- one append-only observation per operator, mint, unit, and observation time; and
-- reconstruction and fingerprint verification before a keyset snapshot is returned as fresh.
+- one append-only observation per operator, mint, unit, and observation time;
+- reconstruction and fingerprint verification before a keyset snapshot is returned as fresh;
+- one append-only reservation per payment ID, bound to an issued invoice/operator/mint route and exact
+  keyset observation; and
+- one local claim per `(mint URL, Y)`, with exact replay and transactional proof-set cardinality and
+  amount checks.
 
-Keyset persistence is a separate repository capability. Invoice issuance and payment intake do not
-automatically observe a mint, select a freshness interval, or load a stored snapshot.
+Keyset and proof-reference persistence are separate repository capabilities. Invoice issuance and HTTP
+payment intake do not automatically observe a mint, select a freshness interval, load a stored snapshot,
+or create a reservation. The reservation stores `Y`, keyset ID, and amount, never the proof secret,
+signature, DLEQ values, witness, memo, or raw payload.
 
 The Cashu request migration refuses an invoice-only database that already contains invoice rows. A
 historical mint allowlist and transport cannot be inferred from an invoice, so deployment requires an
 explicit reviewed backfill or retirement of local-only legacy records before upgrade.
 
 Supporting `paid`, `expired`, or `cancelled` records requires a new migration with state-specific fields
-and checks. In particular, payment acceptance must atomically write the paid invoice, proof reservation,
-and balanced journal; this issuance transaction does not satisfy that later accounting boundary.
+and checks. In particular, payment acceptance must atomically consume the appropriate reservation,
+write the paid invoice and balanced journal, and record operator evidence; the current append-only local
+lock does not satisfy that later accounting boundary.
 
 ## Error and Privacy Boundary
 
@@ -212,6 +221,9 @@ metadata. Do not put customer identity or secrets into identifiers or keys. Merc
 authorization are mandatory before any public or multi-tenant deployment; the current local API does
 not implement them. The NUT-18 POST path is envelope-only and always rejects unverified proofs, so the
 local fixture request must not be presented as payable.
+
+NUT-07 `Y` values are not spendable without their proof secrets, but they are stable, correlation-sensitive
+identifiers. Exclude them from logs, metrics, traces, support artifacts, and merchant-facing responses.
 
 Automatic HTTP access logs are disabled because request paths contain merchant and invoice identifiers.
 Do not enable framework request logging without replacing raw URLs with reviewed route templates and
