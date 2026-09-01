@@ -19,6 +19,7 @@ merchant balances, or move funds.
 - Construct deterministic strict NUT-18 requests for accepted operators and the `stellar` method.
 - Persist each encoded NUT-18 request and its operator-policy snapshot atomically with the invoice.
 - Inspect bounded NUT-18 POST envelopes and reject every payload until proof validation is available.
+- Validate proof signatures and exact mixed-keyset input fees against explicit offline snapshots.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -56,7 +57,7 @@ frameworks adapt to it at the edges.
 | `apps/merchant-console/` | Next.js merchant operations reference client |
 | `services/acquirer-api/` | Fastify policy and durable Cashu invoice API |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
-| `packages/cashu/` | Strict NUT-18 request and payload adapter plus interoperability fixture |
+| `packages/cashu/` | NUT-18, keyset-snapshot, proof-integrity, and fee adapter plus interoperability fixture |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |
 | `docs/` | Architecture, protocol, security, roadmap, development, and ADRs |
 

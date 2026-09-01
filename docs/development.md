@@ -107,7 +107,7 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 | Layer | Current command | What it proves |
 |---|---|---|
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
-| Cashu request adapter | `pnpm --filter @cashmesh/cashu test` | Strict NUT-18 mapping, raw payload bounds, metadata projection, and deterministic decoding |
+| Cashu adapter | `pnpm --filter @cashmesh/cashu test` | NUT-18 mapping, raw bounds, keyset identity, official DLEQ vector, proof integrity, and exact input fees |
 | Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, runtime Cashu configuration, replay, envelope binding, privacy, and sanitized failures |
 | PostgreSQL invoice integration | `pnpm test:integration` | Migration, atomic request persistence, restart, concurrency, replay, corruption, ownership, and rollback behavior |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |

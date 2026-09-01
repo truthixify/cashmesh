@@ -1,7 +1,8 @@
 # Cashu Merchant Payment Requests
 
-**Status:** Strict request construction, durable issuance, and non-accepting HTTP envelope intake
-implemented; proof validation and payment acceptance not implemented
+**Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, and
+offline proof-integrity validation implemented; operator state checks and payment acceptance not
+implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -102,6 +103,34 @@ spent state, verify a keyset or DLEQ proof, calculate input fees, transition the
 merchant journal. Malformed and mismatched payloads return non-success responses without reflecting
 their contents. Every response uses `Cache-Control: no-store`.
 
+## Offline Proof Validation
+
+`packages/cashu` can separately validate the same raw payload against a version `1` keyset snapshot.
+The snapshot binds one normalized mint URL and observation time to public keysets containing unit,
+activity, per-input fee, optional final expiry, and all denomination keys. Snapshot construction is
+bounded to 64 keysets with 256 keys each, verifies every secp256k1 point, recomputes each keyset ID, and
+rejects duplicate IDs. It currently accepts standard `00` and `01` keyset IDs only.
+
+The validator requires every secp proof to contain a valid NUT-12 DLEQ, rejects duplicate secrets,
+unknown or expired keysets, mint and unit mismatches, and denomination/signature failures. Requiring a
+DLEQ is deliberately stricter than NUT-12's verify-if-present baseline. Inactive keysets are accepted as
+inputs before their final expiry because NUT-02 requires mints to accept old proofs after key rotation.
+
+Input fees are calculated across the proof set with exact integer arithmetic using the NUT-02 formula,
+then subtracted from gross value once. The immutable result contains gross, input fee, net, proof count,
+used keyset IDs, mint, unit, invoice ID, snapshot time, and validation time. It contains no secret,
+signature, DLEQ, witness, or memo.
+
+NUT-12's proof-side DLEQ includes the payer's blinding factor. It is needed for receiver-side
+verification but must not be sent back to the mint because that would reveal the link between issuance
+and spend. The metadata-only return prevents accidental forwarding in this capability; future proof
+reservation and operator adapters must preserve the same boundary.
+
+This function is not wired into the HTTP route yet. A snapshot is unauthenticated observation evidence,
+not a freshness guarantee, and offline cryptography cannot establish NUT-07 `UNSPENT` state. The public
+endpoint therefore still returns `503`; a valid offline result must never be presented as a completed
+merchant payment.
+
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
 and support artifacts. Avoid putting customer identity or secrets into invoice identifiers or URLs.
@@ -116,12 +145,18 @@ the identifier, amount, unit, mint list, strict semantics, Stellar method, and P
 This proves request encoding compatibility at the two library boundaries. The HTTP tests prove
 precision-preserving envelope parsing, stored-request binding, rejection behavior, and non-retention;
 they do not prove wallet QR scanning, proof validity, DLEQ verification, input-fee calculation,
-operator redemption, or merchant settlement. Do not present a locally issued fixture request as
-payable.
+operator redemption, or merchant settlement. Separate proof tests cover an official NUT-12 vector,
+deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. They do
+not prove snapshot freshness, unspentness, redemption, or merchant settlement. Do not present a locally
+issued fixture request as payable.
 
 ## References
 
 - [Cashu NUT-18 payment requests](https://github.com/cashubtc/nuts/blob/main/18.md)
+- [Cashu NUT-01 mint public keys](https://github.com/cashubtc/nuts/blob/main/01.md)
+- [Cashu NUT-02 keysets and fees](https://github.com/cashubtc/nuts/blob/main/02.md)
+- [Cashu NUT-07 proof state](https://github.com/cashubtc/nuts/blob/main/07.md)
+- [Cashu NUT-12 DLEQ proofs](https://github.com/cashubtc/nuts/blob/main/12.md)
 - [Cashu NUT-26 payment-request encoding](https://github.com/cashubtc/nuts/blob/main/26.md)
 - [cashu-ts](https://github.com/cashubtc/cashu-ts)
 - [CDK `v0.18.0-rc.3`](https://github.com/cashubtc/cdk/releases/tag/v0.18.0-rc.3)

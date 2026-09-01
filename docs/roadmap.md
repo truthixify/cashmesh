@@ -35,9 +35,10 @@ security, legal, liquidity, and partner evidence.
 - Implemented: PostgreSQL-backed open-invoice creation, lookup, and concurrent idempotent replay.
 - Implemented: atomic persistence and API return of the encoded request and operator-policy snapshot.
 - Implemented: bounded NUT-18 HTTP envelope parsing and persisted-request binding with no false 2xx.
+- Implemented: explicit keyset snapshots, strict offline DLEQ validation, and exact NUT-02 input fees.
 - Remaining: atomic paid-invoice, proof-reservation, and balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
-- Proof, keyset, unit, amount, fee, DLEQ, invoice, and expiry validation.
+- Remaining: authenticated keyset observation, NUT-07 state, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.
 - Receipts, refund records, webhooks, accounting export, and manual attention.
 

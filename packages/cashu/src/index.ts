@@ -1,10 +1,27 @@
 export {
+  CASHU_KEYSET_SNAPSHOT_SCHEMA_VERSION,
+  type CashuKeysetSnapshotEntryInputV1,
+  type CashuKeysetSnapshotEntryV1,
+  CashuKeysetSnapshotError,
+  type CashuKeysetSnapshotErrorCode,
+  type CashuKeysetSnapshotV1,
+  type CreateCashuKeysetSnapshotInputV1,
+  createCashuKeysetSnapshotV1,
+  MAX_CASHU_KEYS_PER_KEYSET,
+  MAX_CASHU_KEYSETS_PER_SNAPSHOT,
+} from "./keyset-snapshot";
+export {
   type CashuPaymentPayloadEnvelopeV1,
   CashuPaymentPayloadError,
   type CashuPaymentPayloadErrorCode,
+  CashuProofValidationError,
+  type CashuProofValidationErrorCode,
   inspectCashuPaymentPayloadV1,
   MAX_NUT18_PAYMENT_PAYLOAD_BYTES,
   MAX_NUT18_PAYMENT_PROOFS,
+  type ValidateCashuPaymentProofsInputV1,
+  type ValidatedCashuPaymentProofsV1,
+  validateCashuPaymentProofsV1,
 } from "./payment-payload";
 export {
   type AcceptedOperatorRouteV1,

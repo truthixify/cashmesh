@@ -1,15 +1,17 @@
-import { type InvoiceId, invoiceId } from "@cashmesh/domain";
+import { type InvoiceId, invoiceId, type UnixTimestamp, unixTimestamp } from "@cashmesh/domain";
 import {
-  normalizeMintUrl,
   PaymentRequest,
   type PaymentRequestPayload,
   type Proof,
+  verifyProofsForReceive,
 } from "@cashu/cashu-ts";
+
+import { type CashuKeysetSnapshotV1, createCashuKeysetSnapshotV1 } from "./keyset-snapshot";
+import { normalizeCashuMintUrl } from "./mint-url";
 
 export const MAX_NUT18_PAYMENT_PAYLOAD_BYTES = 65_536;
 export const MAX_NUT18_PAYMENT_PROOFS = 128;
 
-const MAX_ENDPOINT_LENGTH = 512;
 const MAX_MEMO_LENGTH = 512;
 const MAX_PROOF_IDENTIFIER_LENGTH = 128;
 const MAX_PROOF_SECRET_LENGTH = 4_096;
@@ -25,6 +27,20 @@ export interface CashuPaymentPayloadEnvelopeV1 {
   readonly mintUrl: string;
   readonly proofCount: number;
   readonly unit: string;
+}
+
+export interface ValidateCashuPaymentProofsInputV1 {
+  readonly keysetSnapshot: CashuKeysetSnapshotV1;
+  readonly rawPayload: string;
+  readonly validatedAt: number;
+}
+
+export interface ValidatedCashuPaymentProofsV1 extends CashuPaymentPayloadEnvelopeV1 {
+  readonly inputFee: number;
+  readonly keysetIds: readonly string[];
+  readonly keysetSnapshotObservedAt: UnixTimestamp;
+  readonly netAmount: number;
+  readonly validatedAt: UnixTimestamp;
 }
 
 export type CashuPaymentPayloadErrorCode =
@@ -48,7 +64,158 @@ export class CashuPaymentPayloadError extends Error {
   }
 }
 
+export type CashuProofValidationErrorCode =
+  | "duplicate_proof"
+  | "input_fee_exceeds_amount"
+  | "invalid_validation_input"
+  | "invalid_validation_time"
+  | "keyset_expired"
+  | "keyset_not_found"
+  | "keyset_unit_mismatch"
+  | "mint_mismatch"
+  | "proof_integrity_failed"
+  | "snapshot_from_future";
+
+export class CashuProofValidationError extends Error {
+  override readonly name = "CashuProofValidationError";
+
+  constructor(
+    readonly code: CashuProofValidationErrorCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export function inspectCashuPaymentPayloadV1(rawPayload: string): CashuPaymentPayloadEnvelopeV1 {
+  return decodePaymentPayload(rawPayload).envelope;
+}
+
+export function validateCashuPaymentProofsV1(
+  input: ValidateCashuPaymentProofsInputV1,
+): ValidatedCashuPaymentProofsV1 {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new CashuProofValidationError(
+      "invalid_validation_input",
+      "Cashu proof validation input is invalid.",
+    );
+  }
+  const { envelope, payload } = decodePaymentPayload(input.rawPayload);
+  const keysetSnapshot = createCashuKeysetSnapshotV1(input.keysetSnapshot);
+
+  let validatedAt: UnixTimestamp;
+  try {
+    validatedAt = unixTimestamp(input.validatedAt);
+  } catch {
+    throw new CashuProofValidationError(
+      "invalid_validation_time",
+      "Cashu proof validation time is invalid.",
+    );
+  }
+  if (keysetSnapshot.observedAt > validatedAt) {
+    throw new CashuProofValidationError(
+      "snapshot_from_future",
+      "Cashu keyset snapshot was observed after the validation time.",
+    );
+  }
+  if (keysetSnapshot.mintUrl !== envelope.mintUrl) {
+    throw new CashuProofValidationError(
+      "mint_mismatch",
+      "Cashu keyset snapshot does not match the payment mint.",
+    );
+  }
+
+  const keysetsById = new Map(keysetSnapshot.keysets.map((keyset) => [keyset.id, keyset]));
+  const verificationKeysets = new Map(
+    keysetSnapshot.keysets.map((keyset) => [
+      keyset.id,
+      { id: keyset.id, keys: { ...keyset.keys } },
+    ]),
+  );
+  const proofSecrets = new Set<string>();
+  const usedKeysetIds = new Set<string>();
+  let inputFeePpk = 0n;
+
+  for (const proof of payload.proofs) {
+    if (proofSecrets.has(proof.secret)) {
+      throw new CashuProofValidationError(
+        "duplicate_proof",
+        "Cashu payment contains a duplicate proof.",
+      );
+    }
+    proofSecrets.add(proof.secret);
+
+    const keyset = keysetsById.get(proof.id);
+    if (keyset === undefined) {
+      throw new CashuProofValidationError(
+        "keyset_not_found",
+        "Cashu payment references an unknown keyset.",
+      );
+    }
+    if (keyset.unit !== envelope.unit) {
+      throw new CashuProofValidationError(
+        "keyset_unit_mismatch",
+        "Cashu payment proof keyset uses a different unit.",
+      );
+    }
+    if (keyset.finalExpiry !== undefined && validatedAt >= keyset.finalExpiry) {
+      throw new CashuProofValidationError(
+        "keyset_expired",
+        "Cashu payment proof keyset has expired.",
+      );
+    }
+    usedKeysetIds.add(keyset.id);
+    inputFeePpk += BigInt(keyset.inputFeePpk);
+  }
+
+  try {
+    verifyProofsForReceive(
+      payload.proofs,
+      (keysetId) => {
+        const keyset = verificationKeysets.get(keysetId);
+        if (keyset === undefined) {
+          throw new CashuProofValidationError(
+            "keyset_not_found",
+            "Cashu payment references an unknown keyset.",
+          );
+        }
+        return keyset;
+      },
+      { requireDleq: true },
+    );
+  } catch (error) {
+    if (error instanceof CashuProofValidationError) {
+      throw error;
+    }
+    throw new CashuProofValidationError(
+      "proof_integrity_failed",
+      "Cashu payment proof integrity validation failed.",
+    );
+  }
+
+  const inputFee = (inputFeePpk + 999n) / 1_000n;
+  const grossAmount = BigInt(envelope.grossAmount);
+  if (inputFee > grossAmount) {
+    throw new CashuProofValidationError(
+      "input_fee_exceeds_amount",
+      "Cashu payment input fee exceeds its gross amount.",
+    );
+  }
+
+  return Object.freeze({
+    ...envelope,
+    inputFee: Number(inputFee),
+    keysetIds: Object.freeze([...usedKeysetIds].sort()),
+    keysetSnapshotObservedAt: keysetSnapshot.observedAt,
+    netAmount: Number(grossAmount - inputFee),
+    validatedAt,
+  });
+}
+
+function decodePaymentPayload(rawPayload: string): {
+  readonly envelope: CashuPaymentPayloadEnvelopeV1;
+  readonly payload: PaymentRequestPayload;
+} {
   if (typeof rawPayload !== "string" || rawPayload.length === 0) {
     throw new CashuPaymentPayloadError(
       "invalid_payload",
@@ -101,13 +268,14 @@ export function inspectCashuPaymentPayloadV1(rawPayload: string): CashuPaymentPa
     }
   }
 
-  return Object.freeze({
+  const envelope = Object.freeze({
     grossAmount: Number(grossAmount),
     invoiceId: requestedInvoiceId,
     mintUrl,
     proofCount: payload.proofs.length,
     unit,
   });
+  return { envelope, payload };
 }
 
 function parseInvoiceId(value: string | undefined): InvoiceId {
@@ -129,28 +297,8 @@ function parseUnit(value: string): string {
 }
 
 function normalizePaymentMint(value: string): string {
-  if (value.length === 0 || value.length > MAX_ENDPOINT_LENGTH || value !== value.trim()) {
-    throw new CashuPaymentPayloadError("invalid_mint", "Cashu payment mint URL is invalid.");
-  }
-
-  let endpoint: URL;
   try {
-    endpoint = new URL(value);
-  } catch {
-    throw new CashuPaymentPayloadError("invalid_mint", "Cashu payment mint URL is invalid.");
-  }
-  if (
-    endpoint.protocol !== "https:" ||
-    endpoint.username !== "" ||
-    endpoint.password !== "" ||
-    endpoint.search !== "" ||
-    endpoint.hash !== ""
-  ) {
-    throw new CashuPaymentPayloadError("invalid_mint", "Cashu payment mint URL is unsafe.");
-  }
-
-  try {
-    return normalizeMintUrl(endpoint.toString());
+    return normalizeCashuMintUrl(value);
   } catch {
     throw new CashuPaymentPayloadError("invalid_mint", "Cashu payment mint URL is invalid.");
   }

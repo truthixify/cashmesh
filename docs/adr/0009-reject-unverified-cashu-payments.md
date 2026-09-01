@@ -52,3 +52,6 @@ Replace the terminal rejection only when keyset and DLEQ validation, exact input
 handling, proof reservation, operator settlement, replay constraints, and accounting persistence are
 implemented with restart and ambiguity tests. Revisit the resource bounds only with measured wallet
 interoperability evidence.
+
+ADR-0010 adds deterministic offline keyset, DLEQ, and input-fee validation without changing this
+endpoint's terminal rejection.

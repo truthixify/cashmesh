@@ -53,6 +53,7 @@ of Cashu or Stellar implementations.
 - One merchant/idempotency-key pair commits at most one invoice and changed request terms fail.
 - An issued invoice, encoded request, transport, and operator-policy snapshot commit atomically.
 - An unverified payment envelope never returns success, reserves value, or changes invoice state.
+- Offline proof integrity never substitutes for mint-observed unspent state or durable reservation.
 - Merchant balances reconcile to immutable invoice and settlement references.
 - Reserve visibility and redemption probes never become a solvency guarantee.
 
@@ -76,6 +77,9 @@ of Cashu or Stellar implementations.
 | Cross-merchant invoice lookup | Metadata disclosure | Merchant-scoped query returning the same not-found result |
 | Request rewritten after issuance | Payer redirection or changed accepted liability | Persist exact encoded bytes and normalized route decisions with the invoice |
 | Oversized or imprecise proof payload | Resource exhaustion or wrong amount comparison | Raw JSON byte/proof caps and exact integer decoding before policy lookup |
+| Forged keyset, signature, or denomination | Crediting counterfeit operator liability | Recomputed keyset IDs, validated public points, strict DLEQ, and exact key lookup |
+| Duplicate proof inside one payload | Inflated gross amount | Reject duplicate secrets before amount or fee acceptance |
+| Dust proof fee exhaustion | Merchant receives less redeemable value than invoiced | Mixed-keyset NUT-02 fee calculation with integer round-up |
 | Stale or replayed NUT-18 request | Payment against an invalid invoice | Server-side invoice lookup, half-open expiry check, and unique payment reservation |
 | Unsafe request endpoint | Credential leakage or payer redirection | Normalized HTTPS URLs without credentials, queries, or fragments |
 | False advisory-mint claim | Proofs arrive from an unsupported operator | Omit `mp` and reject advisory construction until catch-all conversion exists |
@@ -139,6 +143,14 @@ The NUT-18 POST route parses at most 64 KiB and 128 proofs from raw JSON, projec
 envelope metadata, and binds it to the stored invoice request. It always rejects after these checks.
 No bearer proof is persisted or considered reserved, and no successful response exists until proof
 validation and accounting can commit atomically.
+
+The Cashu adapter can validate standard `00` and `01` keysets, strict DLEQ evidence, and exact input
+fees from an explicit public snapshot. It accepts inactive keysets before final expiry but rejects
+deprecated base64 and experimental `02` keyset IDs. Snapshot observation is not authenticated or
+freshness-enforced, version `00` IDs do not commit fee metadata, and offline validation cannot establish
+NUT-07 state. The adapter returns no bearer fields and is not connected to payment acceptance. A
+received NUT-12 blinding factor must never be logged, persisted outside encrypted proof custody, or
+forwarded to the mint, where it would reveal an issuance-to-spend link.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

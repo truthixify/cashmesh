@@ -152,6 +152,10 @@ lists the normalized mint, and is not definitely underpaid before input fees. It
 A matching envelope returns `503 proof_validation_unavailable`; no proof is stored, reserved, spent,
 or submitted to an operator.
 
+The Cashu package has a deterministic offline proof validator, but the API has no trusted keyset
+provider, durable snapshot store, NUT-07 observer, or proof reservation yet. That library capability is
+therefore intentionally not enough to change the endpoint response.
+
 | Status | Meaning |
 |---:|---|
 | `400` | Malformed NUT-18 envelope |
