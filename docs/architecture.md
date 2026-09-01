@@ -39,7 +39,8 @@ client:
 
 - integer minor-unit validation;
 - operator tier and settlement-mode policy;
-- future invoice, fee, and merchant-ledger invariants; and
+- versioned invoice lifecycle rules;
+- balanced, operator-aware invoice-payment journals; and
 - future ports for external effects.
 
 It may depend only on small, runtime-independent utilities with a demonstrated need.
@@ -107,6 +108,18 @@ stellar-settlement ----> no network client yet
 The application layer may coordinate ports. Network adapters must not become the source of accounting
 truth.
 
+## Merchant Accounting Boundary
+
+Payment acceptance is one domain operation that returns a paid invoice and its journal together. The
+journal reference binds invoice, merchant, payment, operator, and settlement mode. Its posting shape is
+limited to one operator e-cash or settlement-asset debit, one matching merchant-payable credit, and an
+optional fee-revenue credit.
+
+The invoice validity interval is `[createdAt, expiresAt)`. Payment and cancellation are invalid at the
+expiry second; expiration is valid from that second onward. See the
+[merchant accounting contract](merchant-accounting.md) for the version `1` fields and persistence
+requirements.
+
 ## Operator Policy
 
 | Operator tier | Requested hold | Requested conversion | Default |
@@ -137,8 +150,8 @@ The settlement compatibility crate has a single-process, atomically replaced JSO
 cursor, claim, prepared-envelope, and payout recovery across restart. It is not the production database
 or a multi-process coordination mechanism.
 
-The production database choice is deferred until invoice and recovery schemas are fixed. Persistence
-must provide atomic transitions for:
+The production database is not selected or implemented. Its schema must preserve the fixed invoice and
+recovery contracts and provide atomic transitions for:
 
 - invoice state and accepted proof reservation;
 - one idempotency key to one external payout attempt;
@@ -168,3 +181,4 @@ justify it.
 - [ADR-0002: Operator liabilities remain distinct](adr/0002-distinct-operator-liabilities.md)
 - [ADR-0003: Direct settlement precedes clearing](adr/0003-direct-settlement-before-clearing.md)
 - [ADR-0004: Stock CDK external processor for Stellar](adr/0004-stock-cdk-stellar-processor.md)
+- [ADR-0005: Atomic merchant accounting](adr/0005-atomic-merchant-accounting.md)

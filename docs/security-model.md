@@ -43,6 +43,9 @@ of Cashu or Stellar implementations.
 - Submitted is not paid; paid requires an observed matching transaction.
 - A different transaction hash for the same settlement is a hard conflict.
 - Every monetary value is a bounded integer minor-unit amount.
+- Every paid invoice is persisted atomically with one exactly balanced payment journal.
+- Invoice-payment journals bind the invoice, merchant, payment, operator, and settlement mode.
+- Trusted e-cash assets remain separated by operator in every posting.
 - Operator tiers and caps are evaluated at payment time and recorded with the decision.
 - Merchant balances reconcile to immutable invoice and settlement references.
 - Reserve visibility and redemption probes never become a solvency guarantee.
@@ -60,6 +63,9 @@ of Cashu or Stellar implementations.
 | Forged merchant callback | Fulfillment without payment | Signed/replay-protected webhooks and merchant-side verification |
 | Cashier account compromise | Fraudulent invoice or refund | Least privilege, location scope, audit log, strong authentication |
 | Bearer-proof leakage | Direct value theft | Never log proofs, encrypt local storage, minimize handling |
+| Injected payment metadata | Secret or personal data retained in accounting | Project only declared schema fields into durable domain records |
+| Wrong-merchant journal | Misstated merchant liability | Bind merchant in the reference and require one matching payable credit |
+| Duplicate invoice payment | Double fulfillment or liability | Atomic open-to-paid transition plus database uniqueness constraints |
 | Edge correlation | Privacy loss | Data minimization, retention limits, batching research, honest disclosure |
 | Dependency compromise | Code/key compromise | Exact versions, lockfiles, review, minimal dependencies, CI checks |
 

@@ -26,9 +26,11 @@ security, legal, liquidity, and partner evidence.
 
 ## Merchant Acceptance
 
-**Status:** Planned
+**Status:** In progress
 
-- Versioned merchant invoice and ledger schemas.
+- Implemented: versioned merchant invoice lifecycle and balanced invoice-payment journal domain.
+- Implemented: operator-specific trusted-hold assets and explicit converted-settlement assets.
+- Remaining: transactional database persistence and idempotent invoice API.
 - NUT-18 accepted/preferred operator policy.
 - Proof, keyset, unit, amount, fee, DLEQ, invoice, and expiry validation.
 - Trusted-hold and immediate-conversion settlement.

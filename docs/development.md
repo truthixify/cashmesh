@@ -73,7 +73,7 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 
 | Layer | Current command | What it proves |
 |---|---|---|
-| TypeScript domain | `pnpm --filter @cashmesh/domain test` | Integer amount and operator-policy rules |
+| TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
 | Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation and policy wiring |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
 | Merchant browser | `pnpm test:e2e` | Responsive layout and invoice fixture interaction |

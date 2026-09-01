@@ -3,15 +3,18 @@
 CashMesh is an open merchant acquiring and settlement network for multi-operator Cashu e-cash on
 Stellar.
 
-The repository contains a merchant operations console, a small acquirer API, shared operator-policy
-rules, and a fixture-backed Stellar payment processor for stock CDK `0.18.0-rc.3`. It does **not** run
-a public Cashu mint, sign or broadcast Stellar transactions, persist merchant balances, or move funds.
+The repository contains a merchant operations console, a small acquirer API, shared invoice,
+accounting, and operator-policy rules, and a fixture-backed Stellar payment processor for stock CDK
+`0.18.0-rc.3`. It does **not** run a public Cashu mint, sign or broadcast Stellar transactions, persist
+merchant balances, or move funds.
 
 ## Current Capabilities
 
 - Classify operators as trusted, convertible-only, or unlisted.
 - Force immediate conversion when an operator cannot be safely held.
 - Represent USDC amounts as integer minor units.
+- Create versioned invoices with deterministic paid, expired, and cancelled transitions.
+- Pair payment acceptance with an immutable, balanced, operator-aware merchant journal.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
 - Persist a prepared payout before dispatch and recover without creating a second transaction effect.
@@ -47,7 +50,7 @@ frameworks adapt to it at the edges.
 |---|---|
 | `apps/merchant-console/` | Next.js merchant operations reference client |
 | `services/acquirer-api/` | Fastify health and operator-policy API |
-| `packages/domain/` | Integer money and operator acceptance rules |
+| `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |
 | `docs/` | Architecture, protocol, security, roadmap, development, and ADRs |
 
@@ -71,6 +74,7 @@ pnpm test:e2e
 ```
 
 See [development setup](docs/development.md), [architecture](docs/architecture.md), the
+[merchant accounting contract](docs/merchant-accounting.md), the
 [experimental protocol profile](docs/protocol-profile.md), and the [roadmap](docs/roadmap.md) before
 implementing a network integration.
 
