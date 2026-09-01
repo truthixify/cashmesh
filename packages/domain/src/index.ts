@@ -73,6 +73,8 @@ export {
 export {
   evaluateOperatorPolicy,
   OPERATOR_TIERS,
+  OperatorPolicyError,
+  type OperatorPolicyErrorCode,
   type OperatorPolicyInput,
   type OperatorTier,
   type PolicyDecision,

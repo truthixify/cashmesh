@@ -30,8 +30,10 @@ security, legal, liquidity, and partner evidence.
 
 - Implemented: versioned merchant invoice lifecycle and balanced invoice-payment journal domain.
 - Implemented: operator-specific trusted-hold assets and explicit converted-settlement assets.
+- Implemented: strict NUT-18 `creqA` construction for accepted operators and the `stellar` method.
+- Implemented: one deterministic request fixture decoded by pinned cashu-ts and CDK types.
 - Remaining: transactional database persistence and idempotent invoice API.
-- NUT-18 accepted/preferred operator policy.
+- Remaining: NUT-18 payment receipt and advisory mint support after a catch-all conversion policy.
 - Proof, keyset, unit, amount, fee, DLEQ, invoice, and expiry validation.
 - Trusted-hold and immediate-conversion settlement.
 - Receipts, refund records, webhooks, accounting export, and manual attention.

@@ -173,7 +173,7 @@ Raw Horizon, CDK, filesystem, and signing details are not adopted as stable merc
 - event-driven quote updates;
 - fees, late-payment return, or sub-cent recovery policy;
 - multiple operators sharing a clearing or settlement store; and
-- NUT-18 merchant invoice and proof acceptance.
+- NUT-18 payment payload receipt and proof acceptance; strict request construction is fixture-proven.
 
 No mainnet transaction, funded testnet transaction, or public mint is authorized by this profile.
 

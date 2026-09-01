@@ -47,6 +47,8 @@ of Cashu or Stellar implementations.
 - Invoice-payment journals bind the invoice, merchant, payment, operator, and settlement mode.
 - Trusted e-cash assets remain separated by operator in every posting.
 - Operator tiers and caps are evaluated at payment time and recorded with the decision.
+- A strict payment request lists only accepted operators and never advertises unlisted-mint support.
+- Encoded request intent never replaces server-side invoice expiry, state, or replay enforcement.
 - Merchant balances reconcile to immutable invoice and settlement references.
 - Reserve visibility and redemption probes never become a solvency guarantee.
 
@@ -66,6 +68,9 @@ of Cashu or Stellar implementations.
 | Injected payment metadata | Secret or personal data retained in accounting | Project only declared schema fields into durable domain records |
 | Wrong-merchant journal | Misstated merchant liability | Bind merchant in the reference and require one matching payable credit |
 | Duplicate invoice payment | Double fulfillment or liability | Atomic open-to-paid transition plus database uniqueness constraints |
+| Stale or replayed NUT-18 request | Payment against an invalid invoice | Server-side invoice lookup, half-open expiry check, and unique payment reservation |
+| Unsafe request endpoint | Credential leakage or payer redirection | Normalized HTTPS URLs without credentials, queries, or fragments |
+| False advisory-mint claim | Proofs arrive from an unsupported operator | Omit `mp` and reject advisory construction until catch-all conversion exists |
 | Edge correlation | Privacy loss | Data minimization, retention limits, batching research, honest disclosure |
 | Dependency compromise | Code/key compromise | Exact versions, lockfiles, review, minimal dependencies, CI checks |
 
@@ -79,6 +84,7 @@ CashMesh does not hide everything:
 - Stellar deposits and merchant settlements are public.
 - Operators see quote amount, time, completion, and redemption details.
 - The acquirer sees merchant, invoice, amount, operator, and settlement state.
+- A NUT-18 request reveals its invoice identifier, amount, accepted mints, and transport endpoint.
 - Network and application metadata can correlate parties.
 - Exact amounts and timing can correlate entry and exit.
 - Stablecoin issuer controls remain in force.

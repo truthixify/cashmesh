@@ -74,8 +74,10 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 | Layer | Current command | What it proves |
 |---|---|---|
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
+| Cashu request adapter | `pnpm --filter @cashmesh/cashu test` | Strict NUT-18 mapping, policy boundaries, and deterministic cashu-ts decoding |
 | Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation and policy wiring |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
+| NUT-18 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut18_interoperability` | Pinned CDK decodes the cashu-ts fixture with the intended fields |
 | Merchant browser | `pnpm test:e2e` | Responsive layout and invoice fixture interaction |
 | Cashu process integration | Not implemented | No running `cdk-mintd` or token issuance yet |
 | Stellar fixture integration | `stellar_compatibility` Rust test | Pinned Horizon decoding, identity, finality, and restart rules |
@@ -87,7 +89,7 @@ Never describe a lower test layer as proof that an unimplemented higher layer wo
 
 Dependencies are exact in manifests and reproducible through `pnpm-lock.yaml` and `Cargo.lock`.
 Protocol clients must be introduced only with a compatibility test and an ADR or protocol-profile
-update. CDK release candidates require exact pins.
+update. CDK and cashu-ts release candidates require exact pins.
 
 ## Local Research
 

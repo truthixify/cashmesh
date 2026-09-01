@@ -45,12 +45,22 @@ client:
 
 It may depend only on small, runtime-independent utilities with a demonstrated need.
 
+### Cashu Request Adapter
+
+`packages/cashu` maps a validated open invoice and accepted operator routes to a strict NUT-18
+request. It owns Cashu wire encoding, endpoint normalization, request-size limits, and a versioned
+policy sidecar. It does not receive proofs or decide that an invoice has been paid.
+
+The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
+`creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
+[merchant payment-request profile](cashu-payment-requests.md).
+
 ### Acquirer API
 
 `services/acquirer-api` is the merchant-facing application boundary. It will own:
 
 - invoice creation and lifecycle;
-- NUT-18 payment-request construction;
+- NUT-18 request issuance and payment receipt;
 - proof validation orchestration;
 - operator policy evaluation;
 - merchant ledger entries;
@@ -97,6 +107,8 @@ released.
 ```text
 merchant-console -----> domain
 acquirer-api ----------> domain
+Cashu request adapter -> domain
+Cashu request adapter -> cashu-ts
 Cashu processor ------> stellar-settlement
 Horizon reader -------> stellar-settlement
 future payout signer --> stellar-settlement
@@ -182,3 +194,4 @@ justify it.
 - [ADR-0003: Direct settlement precedes clearing](adr/0003-direct-settlement-before-clearing.md)
 - [ADR-0004: Stock CDK external processor for Stellar](adr/0004-stock-cdk-stellar-processor.md)
 - [ADR-0005: Atomic merchant accounting](adr/0005-atomic-merchant-accounting.md)
+- [ADR-0006: Isolated NUT-18 request adapter](adr/0006-isolate-nut18-request-adapter.md)

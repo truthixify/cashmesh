@@ -9,6 +9,19 @@ export interface OperatorPolicyInput {
   readonly requestedMode?: SettlementMode;
 }
 
+export type OperatorPolicyErrorCode = "invalid_operator_tier" | "invalid_settlement_mode";
+
+export class OperatorPolicyError extends Error {
+  override readonly name = "OperatorPolicyError";
+
+  constructor(
+    readonly code: OperatorPolicyErrorCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export type PolicyDecision =
   | {
       readonly accepted: true;
@@ -21,6 +34,15 @@ export type PolicyDecision =
     };
 
 export function evaluateOperatorPolicy(input: OperatorPolicyInput): PolicyDecision {
+  if (!OPERATOR_TIERS.includes(input.tier)) {
+    throw new OperatorPolicyError("invalid_operator_tier", "Operator tier is invalid.");
+  }
+  if (input.requestedMode !== undefined && !SETTLEMENT_MODES.includes(input.requestedMode)) {
+    throw new OperatorPolicyError(
+      "invalid_settlement_mode",
+      "Requested settlement mode is invalid.",
+    );
+  }
   if (input.tier === "unlisted") {
     return { accepted: false, reason: "operator_not_accepted" };
   }

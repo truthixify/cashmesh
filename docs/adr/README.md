@@ -12,3 +12,4 @@ Current decisions:
 - [ADR-0003: Prove Direct Settlement Before Network Clearing](0003-direct-settlement-before-clearing.md)
 - [ADR-0004: Use a Stock CDK External Processor for Stellar](0004-stock-cdk-stellar-processor.md)
 - [ADR-0005: Pair Invoice Acceptance with a Balanced Journal](0005-atomic-merchant-accounting.md)
+- [ADR-0006: Isolate the NUT-18 Request Adapter](0006-isolate-nut18-request-adapter.md)
