@@ -1,4 +1,5 @@
 import { buildApp } from "./app";
+import { cashuPaymentRequestIssuerFromEnvironment } from "./cashu-configuration";
 import { PostgresInvoiceRepository } from "./postgres-invoice-repository";
 
 const LOCAL_DATABASE_URL = "postgresql://cashmesh:cashmesh_local@127.0.0.1:5432/cashmesh";
@@ -32,18 +33,28 @@ try {
 
 async function startServer(): Promise<void> {
   const port = readPort(process.env.ACQUIRER_PORT);
+  const cashuPaymentRequestIssuer = cashuPaymentRequestIssuerFromEnvironment(process.env);
   const invoiceRepository = await PostgresInvoiceRepository.connect({
     connectionString: readDatabaseUrl(process.env.CASHMESH_DATABASE_URL),
     onBackgroundError: (error) => {
       process.stderr.write(`CashMesh PostgreSQL idle client failed: ${error.name}\n`);
     },
   });
-  const app = buildApp({ invoiceRepository, logger: true });
+  let app: ReturnType<typeof buildApp> | undefined;
 
   try {
+    app = buildApp({ cashuPaymentRequestIssuer, invoiceRepository, logger: true });
     await app.listen({ host: process.env.ACQUIRER_HOST ?? "127.0.0.1", port });
   } catch (error) {
-    await app.close();
+    try {
+      if (app === undefined) {
+        await invoiceRepository.close();
+      } else {
+        await app.close();
+      }
+    } catch {
+      // Preserve the initialization failure that selected this cleanup path.
+    }
     throw error;
   }
 }

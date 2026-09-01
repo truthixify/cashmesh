@@ -1,6 +1,7 @@
 # Cashu Merchant Payment Requests
 
-**Status:** Strict request construction implemented; payment receipt and proof validation not implemented
+**Status:** Strict request construction and durable invoice issuance implemented; payment receipt and
+proof validation not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -13,8 +14,10 @@ NUT-18 preferred-mint and supported-method fields. The encoded compatibility fix
 by CDK `0.18.0-rc.3` in a Rust test. Both dependencies are exact pins because their request types are
 still moving.
 
-CashMesh emits CBOR plus base64url `creqA` requests. NUT-26 `creqB` encoding remains deferred until
-wallet support and QR behavior are tested independently.
+CashMesh emits CBOR plus padded base64url `creqA` requests. The pinned cashu-ts encoder currently
+returns the standard Base64 alphabet, so the isolated adapter replaces `+` and `/` with `-` and `_`
+without changing the CBOR bytes. Both pinned decoders accept the normalized fixture. NUT-26 `creqB`
+encoding remains deferred until wallet and QR behavior are tested independently.
 
 ## Version 1 Mapping
 
@@ -32,8 +35,14 @@ wallet support and QR behavior are tested independently.
 | `nut10` | Omitted; spending conditions are not part of this profile |
 
 The adapter returns a versioned sidecar record containing the invoice amount, invoice expiry,
-request issue time, selected settlement mode, operator tier, and policy reason. That record must be
-persisted with the invoice request when production storage is introduced.
+request issue time, transport URL, selected settlement mode, operator tier, and policy reason. The
+acquirer persists that record, the encoded request, and every accepted route in the same transaction
+as the invoice and idempotency reservation.
+
+The server validates one reusable route profile at startup. Production requires
+`CASHMESH_CASHU_OPERATOR_ROUTES` as a JSON array and `CASHMESH_CASHU_TRANSPORT_URL` as an HTTPS URL.
+HTTP callers cannot submit mint URLs, operator tiers, settlement modes, or transports. The local
+defaults use the reserved `.example` domain and are fixtures that cannot receive a payment.
 
 ## Strict Operator Semantics
 
@@ -60,6 +69,11 @@ The request sets `single_use=true` as payer intent. It does not prevent replay b
 storage must atomically enforce unique invoice payment, payment identifier, and proof reservation
 constraints.
 
+Invoice creation, exact idempotent replay, and lookup return the persisted sidecar. A restart or
+operator-profile change therefore cannot rewrite a previously issued request. PostgreSQL rejects a
+request with zero routes, more than 16 route positions, duplicate operators or mint URLs, invalid
+policy tuples, or a sidecar that cannot be reconstructed to the stored encoded bytes.
+
 ## Input and Privacy Boundaries
 
 - One through 16 unique operators are accepted.
@@ -82,7 +96,8 @@ the identifier, amount, unit, mint list, strict semantics, Stellar method, and P
 
 This proves request encoding compatibility at the two library boundaries. It does not prove wallet QR
 scanning, HTTP receipt, proof validity, DLEQ verification, input-fee calculation, operator redemption,
-or merchant settlement.
+or merchant settlement. The configured POST transport is descriptive until the receiver endpoint is
+implemented; do not present a locally issued fixture request as payable.
 
 ## References
 

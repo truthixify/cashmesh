@@ -80,6 +80,177 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 1,
   }),
+  Object.freeze({
+    name: "persist_cashu_payment_requests",
+    sql: `
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM merchant_invoices) THEN
+          RAISE EXCEPTION 'Cashu request migration requires an explicit legacy invoice backfill';
+        END IF;
+      END
+      $$;
+
+      CREATE TABLE invoice_cashu_requests (
+        invoice_id VARCHAR(128) PRIMARY KEY,
+        merchant_id VARCHAR(128) NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        encoded_request VARCHAR(4096) NOT NULL,
+        encoding TEXT NOT NULL,
+        issued_at BIGINT NOT NULL,
+        mint_policy TEXT NOT NULL,
+        transport_url VARCHAR(512) NOT NULL,
+        CONSTRAINT invoice_cashu_requests_identity_unique UNIQUE (invoice_id, merchant_id),
+        CONSTRAINT invoice_cashu_requests_invoice_format CHECK (
+          invoice_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT invoice_cashu_requests_merchant_format CHECK (
+          merchant_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT invoice_cashu_requests_schema CHECK (schema_version = 1),
+        CONSTRAINT invoice_cashu_requests_encoded CHECK (
+          encoded_request ~ '^creqA[A-Za-z0-9_-]+={0,2}$'
+        ),
+        CONSTRAINT invoice_cashu_requests_encoding CHECK (encoding = 'creqA'),
+        CONSTRAINT invoice_cashu_requests_issued_at CHECK (
+          issued_at >= 0 AND issued_at <= 9007199254740991
+        ),
+        CONSTRAINT invoice_cashu_requests_mint_policy CHECK (mint_policy = 'strict'),
+        CONSTRAINT invoice_cashu_requests_transport CHECK (
+          transport_url ~ '^https://[^[:space:]]+$'
+        ),
+        CONSTRAINT invoice_cashu_requests_invoice_fkey
+          FOREIGN KEY (invoice_id, merchant_id)
+          REFERENCES merchant_invoices (id, merchant_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE TABLE invoice_cashu_request_operators (
+        invoice_id VARCHAR(128) NOT NULL,
+        merchant_id VARCHAR(128) NOT NULL,
+        position SMALLINT NOT NULL,
+        operator_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        mode TEXT NOT NULL,
+        tier TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        CONSTRAINT invoice_cashu_request_operators_pkey PRIMARY KEY (invoice_id, position),
+        CONSTRAINT invoice_cashu_request_operators_operator_unique UNIQUE (
+          invoice_id,
+          operator_id
+        ),
+        CONSTRAINT invoice_cashu_request_operators_mint_unique UNIQUE (invoice_id, mint_url),
+        CONSTRAINT invoice_cashu_request_operators_invoice_format CHECK (
+          invoice_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT invoice_cashu_request_operators_merchant_format CHECK (
+          merchant_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT invoice_cashu_request_operators_position CHECK (
+          position >= 0 AND position < 16
+        ),
+        CONSTRAINT invoice_cashu_request_operators_operator_format CHECK (
+          operator_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT invoice_cashu_request_operators_mint_url CHECK (
+          mint_url ~ '^https://[^[:space:]]+$'
+        ),
+        CONSTRAINT invoice_cashu_request_operators_policy CHECK (
+          (
+            tier = 'trusted'
+            AND reason = 'trusted_operator'
+            AND mode IN ('trusted_hold', 'immediate_conversion')
+          )
+          OR (
+            tier = 'convertible'
+            AND reason = 'conversion_required'
+            AND mode = 'immediate_conversion'
+          )
+        ),
+        CONSTRAINT invoice_cashu_request_operators_request_fkey
+          FOREIGN KEY (invoice_id, merchant_id)
+          REFERENCES invoice_cashu_requests (invoice_id, merchant_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE FUNCTION cashmesh_require_cashu_request_operator()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        request_invoice_id VARCHAR(128);
+      BEGIN
+        IF TG_TABLE_NAME = 'invoice_cashu_requests' THEN
+          request_invoice_id := NEW.invoice_id;
+        ELSE
+          request_invoice_id := OLD.invoice_id;
+        END IF;
+
+        IF EXISTS (
+          SELECT 1 FROM invoice_cashu_requests WHERE invoice_id = request_invoice_id
+        ) AND NOT EXISTS (
+          SELECT 1
+          FROM invoice_cashu_request_operators
+          WHERE invoice_id = request_invoice_id
+        ) THEN
+          RAISE EXCEPTION 'Cashu payment request requires at least one operator'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER invoice_cashu_requests_operator_required
+        AFTER INSERT OR UPDATE ON invoice_cashu_requests
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_cashu_request_operator();
+
+      CREATE CONSTRAINT TRIGGER invoice_cashu_request_operators_required
+        AFTER DELETE OR UPDATE ON invoice_cashu_request_operators
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_cashu_request_operator();
+
+      CREATE FUNCTION cashmesh_require_invoice_cashu_request()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        checkout_invoice_id VARCHAR(128);
+      BEGIN
+        IF TG_TABLE_NAME = 'merchant_invoices' THEN
+          checkout_invoice_id := NEW.id;
+        ELSE
+          checkout_invoice_id := OLD.invoice_id;
+        END IF;
+
+        IF EXISTS (
+          SELECT 1 FROM merchant_invoices WHERE id = checkout_invoice_id
+        ) AND NOT EXISTS (
+          SELECT 1 FROM invoice_cashu_requests WHERE invoice_id = checkout_invoice_id
+        ) THEN
+          RAISE EXCEPTION 'Merchant invoice requires a Cashu payment request'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER merchant_invoices_cashu_request_required
+        AFTER INSERT OR UPDATE ON merchant_invoices
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_invoice_cashu_request();
+
+      CREATE CONSTRAINT TRIGGER invoice_cashu_requests_invoice_required
+        AFTER DELETE OR UPDATE ON invoice_cashu_requests
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_invoice_cashu_request();
+    `,
+    version: 2,
+  }),
 ]);
 
 export async function applyPostgresMigrations(client: PoolClient): Promise<void> {

@@ -1,11 +1,29 @@
+import { Writable } from "node:stream";
+import { CashuPaymentRequestIssuer } from "@cashmesh/cashu";
+import { operatorId } from "@cashmesh/domain";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { buildApp } from "../src/app";
+import { type BuildAppOptions, buildApp } from "../src/app";
 import { InvoiceRepositoryError } from "../src/invoice-repository";
 import { FakeInvoiceRepository } from "./fake-invoice-repository";
 
 const NOW = 1_788_000_000;
 const EXPIRES_AT = NOW + 300;
+const CASHU_PAYMENT_REQUEST_ISSUER = new CashuPaymentRequestIssuer({
+  operators: [
+    {
+      mintUrl: "https://mint-a.cashmesh.example",
+      operatorId: operatorId("operator-a"),
+      tier: "trusted",
+    },
+    {
+      mintUrl: "https://mint-b.cashmesh.example",
+      operatorId: operatorId("operator-b"),
+      tier: "convertible",
+    },
+  ],
+  transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
+});
 const apps: ReturnType<typeof buildApp>[] = [];
 
 afterEach(async () => {
@@ -63,7 +81,34 @@ describe("acquirer API", () => {
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.headers["idempotency-replayed"]).toBe("false");
     expect(response.headers.location).toBe("/v1/merchants/merchant-001/invoices/inv_test-0001");
-    expect(response.json()).toEqual({
+    expect(response.json()).toMatchObject({
+      cashuPaymentRequest: {
+        amount: 1_234,
+        encoding: "creqA",
+        expiresAt: EXPIRES_AT,
+        invoiceId: "inv_test-0001",
+        issuedAt: NOW,
+        mintPolicy: "strict",
+        operators: [
+          {
+            mintUrl: "https://mint-a.cashmesh.example",
+            mode: "trusted_hold",
+            operatorId: "operator-a",
+            reason: "trusted_operator",
+            tier: "trusted",
+          },
+          {
+            mintUrl: "https://mint-b.cashmesh.example",
+            mode: "immediate_conversion",
+            operatorId: "operator-b",
+            reason: "conversion_required",
+            tier: "convertible",
+          },
+        ],
+        schemaVersion: 1,
+        transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
+        unit: "usdc",
+      },
       invoice: {
         amount: 1_234,
         createdAt: NOW,
@@ -76,6 +121,7 @@ describe("acquirer API", () => {
       },
       replayed: false,
     });
+    expect(response.json().cashuPaymentRequest.encodedRequest).toMatch(/^creqA/);
   });
 
   it("returns the original invoice for an exact idempotent replay", async () => {
@@ -154,7 +200,7 @@ describe("acquirer API", () => {
     });
   });
 
-  it("projects only declared invoice fields into the response", async () => {
+  it("projects only declared checkout fields into the response", async () => {
     const { app, repository } = createApp();
     await createInvoice(app, "checkout-001");
     const stored = repository.invoices.get("inv_test-0001");
@@ -163,6 +209,10 @@ describe("acquirer API", () => {
     }
     repository.invoices.set("inv_test-0001", {
       ...stored,
+      cashuPaymentRequest: {
+        ...stored.cashuPaymentRequest,
+        internalRouteSecret: "must-not-leak",
+      },
       internalNote: "must-not-leak",
     } as typeof stored);
 
@@ -173,7 +223,29 @@ describe("acquirer API", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.body).not.toContain("internalNote");
+    expect(response.body).not.toContain("internalRouteSecret");
     expect(response.body).not.toContain("must-not-leak");
+  });
+
+  it("does not write merchant or invoice identifiers to automatic request logs", async () => {
+    let logOutput = "";
+    const destination = new Writable({
+      write(chunk, _encoding, callback) {
+        logOutput += String(chunk);
+        callback();
+      },
+    });
+    const { app } = createApp({ logger: { level: "info", stream: destination } });
+    await createInvoice(app, "checkout-sensitive");
+
+    await app.inject({
+      method: "GET",
+      url: "/v1/merchants/merchant-001/invoices/inv_test-0001",
+    });
+
+    expect(logOutput).not.toContain("merchant-001");
+    expect(logOutput).not.toContain("inv_test-0001");
+    expect(logOutput).not.toContain("checkout-sensitive");
   });
 
   it.each([
@@ -236,14 +308,42 @@ describe("acquirer API", () => {
     expect(repository.closed).toBe(true);
     apps.splice(apps.indexOf(app), 1);
   });
+
+  it("does not persist an invoice when Cashu request issuance fails", async () => {
+    const { app, repository } = createApp({
+      cashuPaymentRequestIssuer: {
+        issue: () => {
+          throw new Error("operator configuration contains secret-value");
+        },
+      },
+    });
+
+    const response = await createInvoice(app, "checkout-001");
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain("secret-value");
+    expect(response.json()).toEqual({
+      error: {
+        code: "payment_request_unavailable",
+        message: "Cashu payment request could not be issued.",
+      },
+    });
+    expect(repository.invoices.size).toBe(0);
+  });
 });
 
 function createApp(
-  options: { readonly clock?: () => number; readonly invoiceIdFactory?: () => string } = {},
+  options: {
+    readonly cashuPaymentRequestIssuer?: Pick<CashuPaymentRequestIssuer, "issue">;
+    readonly clock?: () => number;
+    readonly invoiceIdFactory?: () => string;
+    readonly logger?: BuildAppOptions["logger"];
+  } = {},
 ) {
   const repository = new FakeInvoiceRepository();
   let invoiceSequence = 0;
   const app = buildApp({
+    cashuPaymentRequestIssuer: options.cashuPaymentRequestIssuer ?? CASHU_PAYMENT_REQUEST_ISSUER,
     clock: options.clock ?? (() => NOW),
     invoiceIdFactory:
       options.invoiceIdFactory ??
@@ -252,6 +352,7 @@ function createApp(
         return `inv_test-${String(invoiceSequence).padStart(4, "0")}`;
       }),
     invoiceRepository: repository,
+    ...(options.logger !== undefined && { logger: options.logger }),
   });
   apps.push(app);
   return { app, repository };

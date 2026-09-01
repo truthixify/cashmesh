@@ -1,9 +1,11 @@
+import { CashuPaymentRequestIssuer } from "@cashmesh/cashu";
 import {
   createInvoiceV1,
   idempotencyKey,
   invoiceId,
   merchantId,
   minorUnits,
+  operatorId,
   unixTimestamp,
 } from "@cashmesh/domain";
 import { Pool } from "pg";
@@ -15,6 +17,21 @@ import { PostgresInvoiceRepository } from "../src/postgres-invoice-repository";
 
 const DATABASE_URL = process.env.CASHMESH_TEST_DATABASE_URL;
 const repositories: PostgresInvoiceRepository[] = [];
+const CASHU_PAYMENT_REQUEST_ISSUER = new CashuPaymentRequestIssuer({
+  operators: [
+    {
+      mintUrl: "https://mint-a.cashmesh.example",
+      operatorId: operatorId("operator-a"),
+      tier: "trusted",
+    },
+    {
+      mintUrl: "https://mint-b.cashmesh.example",
+      operatorId: operatorId("operator-b"),
+      tier: "convertible",
+    },
+  ],
+  transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
+});
 
 describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () => {
   beforeAll(async () => {
@@ -27,7 +44,9 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
   beforeEach(async () => {
     const pool = new Pool({ connectionString: requireDatabaseUrl() });
     try {
-      await pool.query("TRUNCATE invoice_creation_requests, merchant_invoices");
+      await pool.query(
+        "TRUNCATE invoice_cashu_request_operators, invoice_cashu_requests, invoice_creation_requests, merchant_invoices",
+      );
     } finally {
       await pool.end();
     }
@@ -56,6 +75,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
   it("replays the HTTP creation response after app restart and invoice expiry", async () => {
     const firstRepository = await connectRepository();
     const firstApp = buildApp({
+      cashuPaymentRequestIssuer: CASHU_PAYMENT_REQUEST_ISSUER,
       clock: () => 1_788_000_000,
       invoiceIdFactory: () => "invoice-api-001",
       invoiceRepository: firstRepository,
@@ -71,6 +91,11 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
 
     const restartedRepository = await connectRepository();
     const restartedApp = buildApp({
+      cashuPaymentRequestIssuer: {
+        issue: () => {
+          throw new Error("Persisted replay must not issue a new Cashu request.");
+        },
+      },
       clock: () => 1_788_000_301,
       invoiceIdFactory: () => {
         throw new Error("Replay must not generate a new invoice identifier.");
@@ -134,7 +159,10 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
     ).resolves.toBeUndefined();
     await expect(
       repository.findOpenInvoice(merchantId("merchant-001"), invoiceId("invoice-001")),
-    ).resolves.toEqual(first.invoice);
+    ).resolves.toEqual({
+      cashuPaymentRequest: first.cashuPaymentRequest,
+      invoice: first.invoice,
+    });
   });
 
   it("rolls back the idempotency reservation when an invoice id collides", async () => {
@@ -149,6 +177,24 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
 
     expect(error).toMatchObject({ code: "invoice_id_conflict" });
     await expectRowCounts({ creations: 1, invoices: 1 });
+  });
+
+  it("rejects a mismatched Cashu sidecar before reserving an invoice", async () => {
+    const repository = await connectRepository();
+    const input = record();
+
+    const error = await errorFromAsync(() =>
+      repository.createOpenInvoice({
+        ...input,
+        cashuPaymentRequest: {
+          ...input.cashuPaymentRequest,
+          encodedRequest: `${input.cashuPaymentRequest.encodedRequest}A`,
+        },
+      }),
+    );
+
+    expect(error).toMatchObject({ code: "invalid_record" });
+    await expectRowCounts({ creations: 0, invoices: 0 });
   });
 
   it("refuses migration history unknown to the running build", async () => {
@@ -166,6 +212,65 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL invoice repository", () 
       expect(error).toMatchObject({ code: "storage_unavailable" });
     } finally {
       await pool.query("DELETE FROM cashmesh_schema_migrations WHERE version = $1", [999]);
+      await pool.end();
+    }
+  });
+
+  it("rejects a stored Cashu request that no longer matches its invoice", async () => {
+    const repository = await connectRepository();
+    await repository.createOpenInvoice(record());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query(
+        "UPDATE invoice_cashu_requests SET encoded_request = $1 WHERE invoice_id = $2",
+        ["creqAinvalid", "invoice-001"],
+      );
+    } finally {
+      await pool.end();
+    }
+
+    const error = await errorFromAsync(() =>
+      repository.findOpenInvoice(merchantId("merchant-001"), invoiceId("invoice-001")),
+    );
+
+    expect(error).toMatchObject({ code: "invalid_record" });
+  });
+
+  it("refuses to commit a Cashu request after its last operator route is removed", async () => {
+    const repository = await connectRepository();
+    await repository.createOpenInvoice(record());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query("DELETE FROM invoice_cashu_request_operators WHERE invoice_id = $1", [
+        "invoice-001",
+      ]);
+
+      const error = await errorFromAsync(() => pool.query("COMMIT"));
+
+      expect(error).toMatchObject({ code: "23514" });
+    } finally {
+      await pool.query("ROLLBACK");
+      await pool.end();
+    }
+  });
+
+  it("refuses to commit an invoice after its Cashu request is removed", async () => {
+    const repository = await connectRepository();
+    await repository.createOpenInvoice(record());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query("DELETE FROM invoice_cashu_request_operators WHERE invoice_id = $1", [
+        "invoice-001",
+      ]);
+      await pool.query("DELETE FROM invoice_cashu_requests WHERE invoice_id = $1", ["invoice-001"]);
+
+      const error = await errorFromAsync(() => pool.query("COMMIT"));
+
+      expect(error).toMatchObject({ code: "23514" });
+    } finally {
+      await pool.query("ROLLBACK");
       await pool.end();
     }
   });
@@ -258,15 +363,20 @@ function record(
   } = {},
 ): CreateOpenInvoiceRecord {
   const ownerId = merchantId(overrides.merchantId ?? "merchant-001");
+  const invoice = createInvoiceV1({
+    amount: minorUnits(1_234),
+    createdAt: unixTimestamp(1_788_000_000),
+    expiresAt: unixTimestamp(1_788_000_300),
+    id: invoiceId(overrides.invoiceId ?? "invoice-001"),
+    merchantId: ownerId,
+  });
   return {
-    idempotencyKey: idempotencyKey(overrides.idempotencyKey ?? "checkout-001"),
-    invoice: createInvoiceV1({
-      amount: minorUnits(1_234),
-      createdAt: unixTimestamp(1_788_000_000),
-      expiresAt: unixTimestamp(1_788_000_300),
-      id: invoiceId(overrides.invoiceId ?? "invoice-001"),
-      merchantId: ownerId,
+    cashuPaymentRequest: CASHU_PAYMENT_REQUEST_ISSUER.issue({
+      invoice,
+      issuedAt: invoice.createdAt,
     }),
+    idempotencyKey: idempotencyKey(overrides.idempotencyKey ?? "checkout-001"),
+    invoice,
     requestFingerprint: overrides.fingerprint ?? "a".repeat(64),
   };
 }
@@ -277,12 +387,21 @@ async function expectRowCounts(expected: {
 }): Promise<void> {
   const pool = new Pool({ connectionString: requireDatabaseUrl() });
   try {
-    const result = await pool.query<{ creations: string; invoices: string }>(`
+    const result = await pool.query<{
+      cashu_operators: string;
+      cashu_requests: string;
+      creations: string;
+      invoices: string;
+    }>(`
       SELECT
         (SELECT COUNT(*) FROM invoice_creation_requests) AS creations,
-        (SELECT COUNT(*) FROM merchant_invoices) AS invoices
+        (SELECT COUNT(*) FROM merchant_invoices) AS invoices,
+        (SELECT COUNT(*) FROM invoice_cashu_requests) AS cashu_requests,
+        (SELECT COUNT(*) FROM invoice_cashu_request_operators) AS cashu_operators
     `);
     expect(result.rows[0]).toEqual({
+      cashu_operators: String(expected.invoices * 2),
+      cashu_requests: String(expected.invoices),
       creations: String(expected.creations),
       invoices: String(expected.invoices),
     });

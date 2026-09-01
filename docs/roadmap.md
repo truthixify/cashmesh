@@ -33,8 +33,9 @@ security, legal, liquidity, and partner evidence.
 - Implemented: strict NUT-18 `creqA` construction for accepted operators and the `stellar` method.
 - Implemented: one deterministic request fixture decoded by pinned cashu-ts and CDK types.
 - Implemented: PostgreSQL-backed open-invoice creation, lookup, and concurrent idempotent replay.
+- Implemented: atomic persistence and API return of the encoded request and operator-policy snapshot.
 - Remaining: atomic paid-invoice, proof-reservation, and balanced-journal persistence.
-- Remaining: NUT-18 payment receipt and advisory mint support after a catch-all conversion policy.
+- Remaining: NUT-18 HTTP payment receipt and advisory mint support after a catch-all conversion policy.
 - Proof, keyset, unit, amount, fee, DLEQ, invoice, and expiry validation.
 - Trusted-hold and immediate-conversion settlement.
 - Receipts, refund records, webhooks, accounting export, and manual attention.

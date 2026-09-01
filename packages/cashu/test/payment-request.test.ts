@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CashuPaymentRequestError,
+  CashuPaymentRequestIssuer,
   type CreateCashuPaymentRequestInput,
   createCashuPaymentRequestV1,
   MAX_NUT18_OPERATORS,
@@ -57,10 +58,12 @@ describe("createCashuPaymentRequestV1", () => {
         },
       ],
       schemaVersion: 1,
+      transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
       unit: "usdc",
     });
     expect(first.encodedRequest).toBe(second.encodedRequest);
     expect(first.encodedRequest.startsWith("creqA")).toBe(true);
+    expect(first.encodedRequest).toMatch(/^creqA[A-Za-z0-9_-]+={0,2}$/);
     expect(decoded.id).toBe("invoice-001");
     expect(decoded.amount?.toBigInt()).toBe(1_234n);
     expect(decoded.unit).toBe("usdc");
@@ -143,6 +146,28 @@ describe("createCashuPaymentRequestV1", () => {
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.operators)).toBe(true);
     expect(Object.isFrozen(result.operators[0])).toBe(true);
+  });
+
+  it("validates a reusable issuer before accepting invoices", () => {
+    const issuer = new CashuPaymentRequestIssuer({
+      operators: [operatorRoute("operator-a", "https://mint-a.example", "trusted")],
+      transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
+    });
+
+    const first = issuer.issue({ invoice: openInvoice(), issuedAt: ISSUED_AT });
+    const second = issuer.issue({ invoice: openInvoice(), issuedAt: ISSUED_AT });
+
+    expect(Object.isFrozen(issuer)).toBe(true);
+    expect(first).toEqual(second);
+    expect(
+      errorFrom(
+        () =>
+          new CashuPaymentRequestIssuer({
+            operators: [],
+            transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
+          }),
+      ),
+    ).toMatchObject({ code: "empty_operator_set" });
   });
 
   it("refuses advisory mint semantics until unlisted conversion is supported", () => {

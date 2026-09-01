@@ -18,8 +18,9 @@ pnpm install
 pnpm exec playwright install chromium
 ```
 
-Copy `.env.example` to `.env` only when a task needs local configuration. Never place funded keys,
-seed phrases, bearer proofs, or production credentials in environment files.
+The API reads process environment variables directly; it does not load `.env` itself. Use
+`.env.example` as a reference and export overrides through the shell or process manager. Never place
+funded keys, seed phrases, bearer proofs, or production credentials in environment files.
 
 ## Run
 
@@ -55,6 +56,18 @@ curl -s http://127.0.0.1:3100/v1/operator-policy/evaluate \
 ```
 
 The expected decision forces `immediate_conversion`.
+
+Outside production, the API uses two non-routable `.example` Cashu operators and an `.example` POST
+transport. Override them with the compact JSON array and HTTPS URL shown in `.env.example`:
+
+```bash
+export CASHMESH_CASHU_OPERATOR_ROUTES='[{"operatorId":"operator-a","mintUrl":"https://mint-a.example","tier":"trusted"}]'
+export CASHMESH_CASHU_TRANSPORT_URL=https://pay.example/v1/cashu/payments
+```
+
+`NODE_ENV=production` requires both values and rejects malformed, duplicate, unlisted, non-HTTPS, or
+oversized profiles before opening the database. The configured POST target is not implemented yet;
+the local request is issuance evidence, not a payable checkout.
 
 The Compose service uses local-only test credentials from `.env.example`. Stop the container without
 deleting its named data volume with:
@@ -93,8 +106,8 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 |---|---|---|
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
 | Cashu request adapter | `pnpm --filter @cashmesh/cashu test` | Strict NUT-18 mapping, policy boundaries, and deterministic cashu-ts decoding |
-| Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, policy, invoice replay, lookup, and sanitized failures |
-| PostgreSQL invoice integration | `pnpm test:integration` | Migration, restart, concurrency, replay, ownership, and rollback behavior |
+| Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, runtime Cashu configuration, replay, lookup, projection, and sanitized failures |
+| PostgreSQL invoice integration | `pnpm test:integration` | Migration, atomic request persistence, restart, concurrency, replay, corruption, ownership, and rollback behavior |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
 | NUT-18 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut18_interoperability` | Pinned CDK decodes the cashu-ts fixture with the intended fields |
 | Merchant browser | `pnpm test:e2e` | Responsive layout and invoice fixture interaction |

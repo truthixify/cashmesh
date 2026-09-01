@@ -17,6 +17,7 @@ merchant balances, or move funds.
 - Pair payment acceptance with an immutable, balanced, operator-aware merchant journal.
 - Persist open invoices with PostgreSQL and make concurrent merchant retries converge on one record.
 - Construct deterministic strict NUT-18 requests for accepted operators and the `stellar` method.
+- Persist each encoded NUT-18 request and its operator-policy snapshot atomically with the invoice.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -52,7 +53,7 @@ frameworks adapt to it at the edges.
 | Path | Responsibility |
 |---|---|
 | `apps/merchant-console/` | Next.js merchant operations reference client |
-| `services/acquirer-api/` | Fastify policy and durable merchant-invoice API |
+| `services/acquirer-api/` | Fastify policy and durable Cashu invoice API |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
 | `packages/cashu/` | Strict NUT-18 request adapter and cross-implementation fixture |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |

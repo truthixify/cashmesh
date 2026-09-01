@@ -47,3 +47,6 @@ journal, webhook, and receipt tables only with the transaction that enforces the
 Revisit the adapter only if operational evidence justifies another transactional database without
 weakening concurrency or accounting constraints. Extend this decision with a new ADR when payment
 acceptance and the balanced merchant journal are persisted atomically.
+
+ADR-0008 extends this storage boundary with the strict Cashu request and operator-policy snapshot; it
+does not change the open-only invoice lifecycle decision.

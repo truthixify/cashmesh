@@ -68,8 +68,8 @@ The adapter pins a current release-candidate cashu-ts version behind this bounda
 - receipts, refund records, webhooks, and reconciliation; and
 - manual-attention workflows.
 
-The API exposes health, operator-policy evaluation, and durable open-invoice creation and lookup.
-Authentication, NUT-18 issuance over HTTP, payment receipt, and terminal invoice transitions are not
+The API exposes health, operator-policy evaluation, and durable open-invoice plus strict NUT-18
+request creation and lookup. Authentication, payment receipt, and terminal invoice transitions are not
 yet implemented.
 
 ### Merchant Console
@@ -108,6 +108,7 @@ released.
 ```text
 merchant-console -----> domain
 acquirer-api ----------> domain
+acquirer-api ----------> Cashu request adapter
 acquirer-api ----------> PostgreSQL
 Cashu request adapter -> domain
 Cashu request adapter -> cashu-ts
@@ -164,10 +165,11 @@ The settlement compatibility crate has a single-process, atomically replaced JSO
 cursor, claim, prepared-envelope, and payout recovery across restart. It is not the production database
 or a multi-process coordination mechanism.
 
-PostgreSQL is selected for acquirer persistence. The implemented initial migration stores open invoice
-issuance and merchant-scoped idempotency records. It uses database constraints for domain bounds and a
-deferred ownership foreign key so an idempotency reservation cannot commit without its invoice. See
-the [merchant invoice API](invoice-api.md) for request and replay semantics.
+PostgreSQL is selected for acquirer persistence. The implemented migrations store open invoice
+issuance, merchant-scoped idempotency, encoded Cashu requests, and normalized operator-policy routes.
+Database constraints require the reservation, invoice, request, and at least one accepted route to
+commit together. Stored requests are reconstructed through the pinned adapter before return. See the
+[merchant invoice API](invoice-api.md) for request and replay semantics.
 
 Later migrations must preserve the fixed invoice and recovery contracts and provide atomic transitions
 for:
@@ -203,3 +205,4 @@ justify it.
 - [ADR-0005: Atomic merchant accounting](adr/0005-atomic-merchant-accounting.md)
 - [ADR-0006: Isolated NUT-18 request adapter](adr/0006-isolate-nut18-request-adapter.md)
 - [ADR-0007: PostgreSQL invoice issuance](adr/0007-postgres-invoice-issuance.md)
+- [ADR-0008: Persisted Cashu request snapshots](adr/0008-persist-cashu-request-snapshots.md)

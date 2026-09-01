@@ -1,4 +1,4 @@
-import type { InvoiceId, MerchantId, OpenInvoiceV1 } from "@cashmesh/domain";
+import type { InvoiceId, MerchantId } from "@cashmesh/domain";
 
 import {
   type CreateOpenInvoiceRecord,
@@ -6,16 +6,17 @@ import {
   type FindInvoiceCreationRecord,
   type InvoiceRepository,
   InvoiceRepositoryError,
+  type IssuedInvoiceV1,
 } from "../src/invoice-repository";
 
 interface CreationRecord {
   readonly fingerprint: string;
-  readonly invoice: OpenInvoiceV1;
+  readonly issuedInvoice: IssuedInvoiceV1;
 }
 
 export class FakeInvoiceRepository implements InvoiceRepository {
   readonly creations = new Map<string, CreationRecord>();
-  readonly invoices = new Map<string, OpenInvoiceV1>();
+  readonly invoices = new Map<string, IssuedInvoiceV1>();
   closed = false;
   failure?: InvoiceRepositoryError;
 
@@ -36,21 +37,27 @@ export class FakeInvoiceRepository implements InvoiceRepository {
           "Idempotency request fingerprint differs.",
         );
       }
-      return Object.freeze({ invoice: existing.invoice, replayed: true });
+      return Object.freeze({ ...existing.issuedInvoice, replayed: true });
     }
     if (this.invoices.has(input.invoice.id)) {
       throw new InvoiceRepositoryError("invoice_id_conflict", "Invoice identifier exists.");
     }
 
+    const issuedInvoice = Object.freeze({
+      cashuPaymentRequest: input.cashuPaymentRequest,
+      invoice: input.invoice,
+    });
     this.creations.set(
       creationKey,
-      Object.freeze({ fingerprint: input.requestFingerprint, invoice: input.invoice }),
+      Object.freeze({ fingerprint: input.requestFingerprint, issuedInvoice }),
     );
-    this.invoices.set(input.invoice.id, input.invoice);
-    return Object.freeze({ invoice: input.invoice, replayed: false });
+    this.invoices.set(input.invoice.id, issuedInvoice);
+    return Object.freeze({ ...issuedInvoice, replayed: false });
   }
 
-  async findInvoiceCreation(input: FindInvoiceCreationRecord): Promise<OpenInvoiceV1 | undefined> {
+  async findInvoiceCreation(
+    input: FindInvoiceCreationRecord,
+  ): Promise<IssuedInvoiceV1 | undefined> {
     if (this.failure !== undefined) {
       throw this.failure;
     }
@@ -65,17 +72,17 @@ export class FakeInvoiceRepository implements InvoiceRepository {
         "Idempotency request fingerprint differs.",
       );
     }
-    return existing.invoice;
+    return existing.issuedInvoice;
   }
 
   async findOpenInvoice(
     ownerId: MerchantId,
     requestedInvoiceId: InvoiceId,
-  ): Promise<OpenInvoiceV1 | undefined> {
+  ): Promise<IssuedInvoiceV1 | undefined> {
     if (this.failure !== undefined) {
       throw this.failure;
     }
     const invoice = this.invoices.get(requestedInvoiceId);
-    return invoice?.merchantId === ownerId ? invoice : undefined;
+    return invoice?.invoice.merchantId === ownerId ? invoice : undefined;
   }
 }

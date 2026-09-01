@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { CashuPaymentRequestIssuer } from "@cashmesh/cashu";
 import {
   createInvoiceV1,
   idempotencyKey,
@@ -13,6 +14,7 @@ import {
   type CreateOpenInvoiceResult,
   type InvoiceRepository,
   InvoiceRepositoryError,
+  type IssuedInvoiceV1,
 } from "./invoice-repository";
 
 const INVOICE_ID_ATTEMPTS = 3;
@@ -38,6 +40,7 @@ export type InvoiceServiceErrorCode =
   | "idempotency_conflict"
   | "invalid_invoice"
   | "invalid_request"
+  | "payment_request_unavailable"
   | "storage_unavailable";
 
 export class InvoiceServiceError extends Error {
@@ -57,6 +60,7 @@ export class InvoiceService {
 
   constructor(
     private readonly repository: InvoiceRepository,
+    private readonly cashuPaymentRequestIssuer: Pick<CashuPaymentRequestIssuer, "issue">,
     options: InvoiceServiceOptions = {},
   ) {
     this.clock = options.clock ?? (() => Math.floor(Date.now() / 1_000));
@@ -100,7 +104,7 @@ export class InvoiceService {
         requestFingerprint,
       });
       if (existingInvoice !== undefined) {
-        return Object.freeze({ invoice: existingInvoice, replayed: true });
+        return Object.freeze({ ...existingInvoice, replayed: true });
       }
     } catch (error) {
       throw mapRepositoryError(error);
@@ -140,8 +144,22 @@ export class InvoiceService {
         );
       }
 
+      let cashuPaymentRequest: ReturnType<CashuPaymentRequestIssuer["issue"]>;
+      try {
+        cashuPaymentRequest = this.cashuPaymentRequestIssuer.issue({
+          invoice,
+          issuedAt: createdAt,
+        });
+      } catch {
+        throw new InvoiceServiceError(
+          "payment_request_unavailable",
+          "Cashu payment request could not be issued.",
+        );
+      }
+
       try {
         return await this.repository.createOpenInvoice({
+          cashuPaymentRequest,
           idempotencyKey: requestKey,
           invoice,
           requestFingerprint,
@@ -161,7 +179,7 @@ export class InvoiceService {
     throw new InvoiceServiceError("storage_unavailable", "Invoice could not be created.");
   }
 
-  async find(input: FindMerchantInvoiceInput): Promise<OpenInvoiceV1 | undefined> {
+  async find(input: FindMerchantInvoiceInput): Promise<IssuedInvoiceV1 | undefined> {
     let ownerId: ReturnType<typeof merchantId>;
     let requestedInvoiceId: ReturnType<typeof invoiceId>;
     try {

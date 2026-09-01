@@ -1,4 +1,9 @@
 import {
+  type AcceptedOperatorRouteV1,
+  type CashuPaymentRequestV1,
+  createCashuPaymentRequestV1,
+} from "@cashmesh/cashu";
+import {
   createInvoiceV1,
   type InvoiceId,
   invoiceId,
@@ -6,6 +11,9 @@ import {
   merchantId,
   minorUnits,
   type OpenInvoiceV1,
+  type OperatorTier,
+  operatorId,
+  type SettlementMode,
   unixTimestamp,
 } from "@cashmesh/domain";
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
@@ -16,18 +24,38 @@ import {
   type FindInvoiceCreationRecord,
   type InvoiceRepository,
   InvoiceRepositoryError,
+  type IssuedInvoiceV1,
 } from "./invoice-repository";
 import { applyPostgresMigrations } from "./postgres-schema";
 
 interface InvoiceRow extends QueryResultRow {
   readonly amount: string;
+  readonly cashu_schema_version: number | null;
   readonly created_at: string;
+  readonly encoded_request: string | null;
+  readonly encoding: string | null;
   readonly expires_at: string;
   readonly id: string;
+  readonly issued_at: string | null;
   readonly merchant_id: string;
+  readonly mint_policy: string | null;
   readonly schema_version: number;
   readonly state: string;
+  readonly transport_url: string | null;
   readonly unit: string;
+}
+
+interface CreationRow extends InvoiceRow {
+  readonly request_fingerprint: string;
+}
+
+interface CashuOperatorRow extends QueryResultRow {
+  readonly mint_url: string;
+  readonly mode: string;
+  readonly operator_id: string;
+  readonly position: number;
+  readonly reason: string;
+  readonly tier: string;
 }
 
 interface ReservationRow extends QueryResultRow {
@@ -99,6 +127,10 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
 
   async createOpenInvoice(input: CreateOpenInvoiceRecord): Promise<CreateOpenInvoiceResult> {
     try {
+      const cashuPaymentRequest = validateCashuPaymentRequest(
+        input.invoice,
+        input.cashuPaymentRequest,
+      );
       return await this.withTransaction(async (client) => {
         const reservation = await client.query<ReservationRow>(
           `
@@ -151,7 +183,12 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
             input.invoice.state,
           ],
         );
-        return Object.freeze({ invoice: input.invoice, replayed: false });
+        await this.insertCashuPaymentRequest(client, input.invoice, cashuPaymentRequest);
+        return Object.freeze({
+          cashuPaymentRequest,
+          invoice: input.invoice,
+          replayed: false,
+        });
       });
     } catch (error) {
       throw mapStorageError(error);
@@ -161,30 +198,13 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
   async findOpenInvoice(
     ownerId: MerchantId,
     requestedInvoiceId: InvoiceId,
-  ): Promise<OpenInvoiceV1 | undefined> {
+  ): Promise<IssuedInvoiceV1 | undefined> {
+    let client: PoolClient | undefined;
     try {
-      const result = await this.pool.query<InvoiceRow>(
-        `
-          SELECT id, merchant_id, schema_version, unit, amount, created_at, expires_at, state
-          FROM merchant_invoices
-          WHERE merchant_id = $1 AND id = $2
-        `,
-        [ownerId, requestedInvoiceId],
-      );
-      const row = result.rows[0];
-      return row === undefined ? undefined : mapInvoiceRow(row);
-    } catch (error) {
-      throw mapStorageError(error);
-    }
-  }
-
-  async findInvoiceCreation(input: FindInvoiceCreationRecord): Promise<OpenInvoiceV1 | undefined> {
-    try {
-      const result = await this.pool.query<InvoiceRow & ReservationRow>(
+      client = await this.pool.connect();
+      const result = await client.query<InvoiceRow>(
         `
           SELECT
-            request.invoice_id,
-            request.request_fingerprint,
             invoice.id,
             invoice.merchant_id,
             invoice.schema_version,
@@ -192,16 +212,37 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
             invoice.amount,
             invoice.created_at,
             invoice.expires_at,
-            invoice.state
-          FROM invoice_creation_requests AS request
-          JOIN merchant_invoices AS invoice
-            ON invoice.id = request.invoice_id
-            AND invoice.merchant_id = request.merchant_id
-          WHERE request.merchant_id = $1 AND request.idempotency_key = $2
+            invoice.state,
+            cashu.schema_version AS cashu_schema_version,
+            cashu.encoded_request,
+            cashu.encoding,
+            cashu.issued_at,
+            cashu.mint_policy,
+            cashu.transport_url
+          FROM merchant_invoices AS invoice
+          LEFT JOIN invoice_cashu_requests AS cashu
+            ON cashu.invoice_id = invoice.id
+            AND cashu.merchant_id = invoice.merchant_id
+          WHERE invoice.merchant_id = $1 AND invoice.id = $2
         `,
-        [input.merchantId, input.idempotencyKey],
+        [ownerId, requestedInvoiceId],
       );
       const row = result.rows[0];
+      return row === undefined ? undefined : await this.mapIssuedInvoice(client, row);
+    } catch (error) {
+      throw mapStorageError(error);
+    } finally {
+      client?.release();
+    }
+  }
+
+  async findInvoiceCreation(
+    input: FindInvoiceCreationRecord,
+  ): Promise<IssuedInvoiceV1 | undefined> {
+    let client: PoolClient | undefined;
+    try {
+      client = await this.pool.connect();
+      const row = await this.findCreationRow(client, input.merchantId, input.idempotencyKey);
       if (row === undefined) {
         return undefined;
       }
@@ -211,9 +252,11 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           "Idempotency key was already used for a different invoice request.",
         );
       }
-      return mapInvoiceRow(row);
+      return await this.mapIssuedInvoice(client, row);
     } catch (error) {
       throw mapStorageError(error);
+    } finally {
+      client?.release();
     }
   }
 
@@ -221,36 +264,75 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     await this.withTransaction(async (client) => applyPostgresMigrations(client));
   }
 
+  private async insertCashuPaymentRequest(
+    client: PoolClient,
+    invoice: OpenInvoiceV1,
+    request: CashuPaymentRequestV1,
+  ): Promise<void> {
+    await client.query(
+      `
+        INSERT INTO invoice_cashu_requests (
+          invoice_id,
+          merchant_id,
+          schema_version,
+          encoded_request,
+          encoding,
+          issued_at,
+          mint_policy,
+          transport_url
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `,
+      [
+        invoice.id,
+        invoice.merchantId,
+        request.schemaVersion,
+        request.encodedRequest,
+        request.encoding,
+        request.issuedAt,
+        request.mintPolicy,
+        request.transportUrl,
+      ],
+    );
+
+    for (const [position, route] of request.operators.entries()) {
+      await client.query(
+        `
+          INSERT INTO invoice_cashu_request_operators (
+            invoice_id,
+            merchant_id,
+            position,
+            operator_id,
+            mint_url,
+            mode,
+            tier,
+            reason
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `,
+        [
+          invoice.id,
+          invoice.merchantId,
+          position,
+          route.operatorId,
+          route.mintUrl,
+          route.mode,
+          route.tier,
+          route.reason,
+        ],
+      );
+    }
+  }
+
   private async readReplay(
     client: PoolClient,
     input: CreateOpenInvoiceRecord,
   ): Promise<CreateOpenInvoiceResult> {
-    const result = await client.query<InvoiceRow & ReservationRow>(
-      `
-        SELECT
-          request.invoice_id,
-          request.request_fingerprint,
-          invoice.id,
-          invoice.merchant_id,
-          invoice.schema_version,
-          invoice.unit,
-          invoice.amount,
-          invoice.created_at,
-          invoice.expires_at,
-          invoice.state
-        FROM invoice_creation_requests AS request
-        JOIN merchant_invoices AS invoice
-          ON invoice.id = request.invoice_id
-          AND invoice.merchant_id = request.merchant_id
-        WHERE request.merchant_id = $1 AND request.idempotency_key = $2
-      `,
-      [input.invoice.merchantId, input.idempotencyKey],
-    );
-    const row = result.rows[0];
+    const row = await this.findCreationRow(client, input.invoice.merchantId, input.idempotencyKey);
     if (row === undefined) {
       throw new InvoiceRepositoryError(
         "invalid_record",
-        "Invoice idempotency record has no matching invoice.",
+        "Invoice idempotency record has no matching issued invoice.",
       );
     }
     if (row.request_fingerprint !== input.requestFingerprint) {
@@ -259,7 +341,60 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         "Idempotency key was already used for a different invoice request.",
       );
     }
-    return Object.freeze({ invoice: mapInvoiceRow(row), replayed: true });
+    const issuedInvoice = await this.mapIssuedInvoice(client, row);
+    return Object.freeze({ ...issuedInvoice, replayed: true });
+  }
+
+  private async findCreationRow(
+    client: PoolClient,
+    ownerId: MerchantId,
+    requestKey: string,
+  ): Promise<CreationRow | undefined> {
+    const result = await client.query<CreationRow>(
+      `
+        SELECT
+          creation.request_fingerprint,
+          invoice.id,
+          invoice.merchant_id,
+          invoice.schema_version,
+          invoice.unit,
+          invoice.amount,
+          invoice.created_at,
+          invoice.expires_at,
+          invoice.state,
+          cashu.schema_version AS cashu_schema_version,
+          cashu.encoded_request,
+          cashu.encoding,
+          cashu.issued_at,
+          cashu.mint_policy,
+          cashu.transport_url
+        FROM invoice_creation_requests AS creation
+        JOIN merchant_invoices AS invoice
+          ON invoice.id = creation.invoice_id
+          AND invoice.merchant_id = creation.merchant_id
+        LEFT JOIN invoice_cashu_requests AS cashu
+          ON cashu.invoice_id = invoice.id
+          AND cashu.merchant_id = invoice.merchant_id
+        WHERE creation.merchant_id = $1 AND creation.idempotency_key = $2
+      `,
+      [ownerId, requestKey],
+    );
+    return result.rows[0];
+  }
+
+  private async mapIssuedInvoice(client: PoolClient, row: InvoiceRow): Promise<IssuedInvoiceV1> {
+    const invoice = mapInvoiceRow(row);
+    const operators = await client.query<CashuOperatorRow>(
+      `
+        SELECT position, operator_id, mint_url, mode, tier, reason
+        FROM invoice_cashu_request_operators
+        WHERE invoice_id = $1
+        ORDER BY position
+      `,
+      [invoice.id],
+    );
+    const cashuPaymentRequest = mapCashuPaymentRequest(row, operators.rows, invoice);
+    return Object.freeze({ cashuPaymentRequest, invoice });
   }
 
   private async withTransaction<T>(action: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -302,6 +437,159 @@ function mapInvoiceRow(row: InvoiceRow): OpenInvoiceV1 {
   }
 }
 
+function mapCashuPaymentRequest(
+  row: InvoiceRow,
+  operatorRows: readonly CashuOperatorRow[],
+  invoice: OpenInvoiceV1,
+): CashuPaymentRequestV1 {
+  try {
+    if (
+      row.cashu_schema_version !== 1 ||
+      row.encoded_request === null ||
+      row.encoding !== "creqA" ||
+      row.issued_at === null ||
+      row.mint_policy !== "strict" ||
+      row.transport_url === null ||
+      operatorRows.length === 0
+    ) {
+      return failInvalidCashuRecord();
+    }
+    const issuedAt = unixTimestamp(parseSafeInteger(row.issued_at));
+    if (issuedAt !== invoice.createdAt) {
+      return failInvalidCashuRecord();
+    }
+    const configuredRoutes = operatorRows.map((operator, position) => {
+      if (
+        operator.position !== position ||
+        !isOperatorTier(operator.tier) ||
+        !isSettlementMode(operator.mode)
+      ) {
+        return failInvalidCashuRecord();
+      }
+      return {
+        mintUrl: operator.mint_url,
+        operatorId: operatorId(operator.operator_id),
+        requestedMode: operator.mode,
+        tier: operator.tier,
+      };
+    });
+    const reconstructed = createCashuPaymentRequestV1({
+      invoice,
+      issuedAt,
+      mintPolicy: "strict",
+      operators: configuredRoutes,
+      transportUrl: row.transport_url,
+    });
+    if (
+      reconstructed.encodedRequest !== row.encoded_request ||
+      reconstructed.transportUrl !== row.transport_url ||
+      !operatorRows.every((operator, position) =>
+        sameOperatorRoute(operator, reconstructed.operators[position]),
+      )
+    ) {
+      return failInvalidCashuRecord();
+    }
+    return reconstructed;
+  } catch (error) {
+    if (error instanceof InvoiceRepositoryError) {
+      throw error;
+    }
+    return failInvalidCashuRecord();
+  }
+}
+
+function validateCashuPaymentRequest(
+  invoice: OpenInvoiceV1,
+  request: CashuPaymentRequestV1,
+): CashuPaymentRequestV1 {
+  try {
+    if (request.issuedAt !== invoice.createdAt) {
+      return failInvalidCashuRecord();
+    }
+    const reconstructed = createCashuPaymentRequestV1({
+      invoice,
+      issuedAt: request.issuedAt,
+      mintPolicy: request.mintPolicy,
+      operators: request.operators.map((route) => ({
+        mintUrl: route.mintUrl,
+        operatorId: operatorId(route.operatorId),
+        requestedMode: route.mode,
+        tier: route.tier,
+      })),
+      transportUrl: request.transportUrl,
+    });
+    if (!sameCashuPaymentRequest(request, reconstructed)) {
+      return failInvalidCashuRecord();
+    }
+    return reconstructed;
+  } catch (error) {
+    if (error instanceof InvoiceRepositoryError) {
+      throw error;
+    }
+    return failInvalidCashuRecord();
+  }
+}
+
+function sameCashuPaymentRequest(
+  left: CashuPaymentRequestV1,
+  right: CashuPaymentRequestV1,
+): boolean {
+  return (
+    left.amount === right.amount &&
+    left.encodedRequest === right.encodedRequest &&
+    left.encoding === right.encoding &&
+    left.expiresAt === right.expiresAt &&
+    left.invoiceId === right.invoiceId &&
+    left.issuedAt === right.issuedAt &&
+    left.mintPolicy === right.mintPolicy &&
+    left.schemaVersion === right.schemaVersion &&
+    left.transportUrl === right.transportUrl &&
+    left.unit === right.unit &&
+    left.operators.length === right.operators.length &&
+    left.operators.every((route, position) => sameAcceptedRoute(route, right.operators[position]))
+  );
+}
+
+function sameOperatorRoute(
+  row: CashuOperatorRow,
+  route: AcceptedOperatorRouteV1 | undefined,
+): boolean {
+  return (
+    route !== undefined &&
+    row.mint_url === route.mintUrl &&
+    row.mode === route.mode &&
+    row.operator_id === route.operatorId &&
+    row.reason === route.reason &&
+    row.tier === route.tier
+  );
+}
+
+function sameAcceptedRoute(
+  left: AcceptedOperatorRouteV1,
+  right: AcceptedOperatorRouteV1 | undefined,
+): boolean {
+  return (
+    right !== undefined &&
+    left.mintUrl === right.mintUrl &&
+    left.mode === right.mode &&
+    left.operatorId === right.operatorId &&
+    left.reason === right.reason &&
+    left.tier === right.tier
+  );
+}
+
+function isOperatorTier(value: string): value is Exclude<OperatorTier, "unlisted"> {
+  return value === "trusted" || value === "convertible";
+}
+
+function isSettlementMode(value: string): value is SettlementMode {
+  return value === "trusted_hold" || value === "immediate_conversion";
+}
+
+function failInvalidCashuRecord(): never {
+  throw new InvoiceRepositoryError("invalid_record", "Stored Cashu payment request is invalid.");
+}
+
 function parseSafeInteger(value: string): number {
   if (!/^(0|[1-9][0-9]*)$/.test(value)) {
     throw new InvoiceRepositoryError("invalid_record", "Stored integer field is invalid.");
@@ -322,7 +610,9 @@ function mapStorageError(error: unknown): InvoiceRepositoryError {
     databaseError.code === "23505" &&
     (databaseError.constraint === "merchant_invoices_pkey" ||
       databaseError.constraint === "merchant_invoices_identity_unique" ||
-      databaseError.constraint === "invoice_creation_requests_invoice_unique")
+      databaseError.constraint === "invoice_creation_requests_invoice_unique" ||
+      databaseError.constraint === "invoice_cashu_requests_pkey" ||
+      databaseError.constraint === "invoice_cashu_requests_identity_unique")
   ) {
     return new InvoiceRepositoryError(
       "invoice_id_conflict",

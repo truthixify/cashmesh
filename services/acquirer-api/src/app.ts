@@ -1,3 +1,4 @@
+import type { CashuPaymentRequestIssuer } from "@cashmesh/cashu";
 import {
   evaluateOperatorPolicy,
   OPERATOR_TIERS,
@@ -5,7 +6,13 @@ import {
   SETTLEMENT_MODES,
   type SettlementMode,
 } from "@cashmesh/domain";
-import Fastify, { type FastifyBaseLogger, type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, {
+  type FastifyBaseLogger,
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyServerOptions,
+  LogController,
+} from "fastify";
 
 import type { InvoiceRepository } from "./invoice-repository";
 import { registerInvoiceRoutes } from "./invoice-routes";
@@ -27,21 +34,27 @@ const policyBodySchema = {
 } as const;
 
 export interface BuildAppOptions {
+  readonly cashuPaymentRequestIssuer: Pick<CashuPaymentRequestIssuer, "issue">;
   readonly clock?: () => number;
   readonly invoiceIdFactory?: () => string;
   readonly invoiceRepository: InvoiceRepository;
-  readonly logger?: boolean;
+  readonly logger?: FastifyServerOptions["logger"];
 }
 
 export function buildApp(options: BuildAppOptions): FastifyInstance {
   const app = Fastify({
     ajv: { customOptions: { removeAdditional: false } },
+    logController: new LogController({ disableRequestLogging: true }),
     logger: options.logger ?? false,
   });
-  const invoiceService = new InvoiceService(options.invoiceRepository, {
-    ...(options.clock !== undefined && { clock: options.clock }),
-    ...(options.invoiceIdFactory !== undefined && { invoiceIdFactory: options.invoiceIdFactory }),
-  });
+  const invoiceService = new InvoiceService(
+    options.invoiceRepository,
+    options.cashuPaymentRequestIssuer,
+    {
+      ...(options.clock !== undefined && { clock: options.clock }),
+      ...(options.invoiceIdFactory !== undefined && { invoiceIdFactory: options.invoiceIdFactory }),
+    },
+  );
 
   app.addHook("onClose", async () => options.invoiceRepository.close());
   app.setErrorHandler((error, request, reply) => handleError(error, request.log, reply));

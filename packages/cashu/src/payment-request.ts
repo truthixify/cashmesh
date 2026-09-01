@@ -54,22 +54,31 @@ export interface CashuPaymentRequestV1 {
   readonly mintPolicy: "strict";
   readonly operators: readonly AcceptedOperatorRouteV1[];
   readonly schemaVersion: typeof CASHU_PAYMENT_REQUEST_SCHEMA_VERSION;
+  readonly transportUrl: string;
   readonly unit: typeof CASHU_UNIT;
 }
 
-export interface CreateCashuPaymentRequestInput {
-  readonly invoice: OpenInvoiceV1;
-  readonly issuedAt: UnixTimestamp;
+export interface CashuPaymentRequestIssuerOptions {
   readonly mintPolicy?: Nut18MintPolicy;
   readonly operators: readonly CashuOperatorRoute[];
   readonly transportUrl: string;
 }
+
+export interface IssueCashuPaymentRequestInput {
+  readonly invoice: OpenInvoiceV1;
+  readonly issuedAt: UnixTimestamp;
+}
+
+export interface CreateCashuPaymentRequestInput
+  extends CashuPaymentRequestIssuerOptions,
+    IssueCashuPaymentRequestInput {}
 
 export type CashuPaymentRequestErrorCode =
   | "advisory_policy_unsupported"
   | "duplicate_mint"
   | "duplicate_operator"
   | "empty_operator_set"
+  | "encoding_failed"
   | "invalid_endpoint"
   | "invalid_issued_at"
   | "invalid_invoice"
@@ -94,6 +103,85 @@ export class CashuPaymentRequestError extends Error {
   }
 }
 
+export class CashuPaymentRequestIssuer {
+  private readonly mintPolicy: "strict";
+  private readonly operators: readonly AcceptedOperatorRouteV1[];
+  private readonly transportUrl: string;
+
+  constructor(options: CashuPaymentRequestIssuerOptions) {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
+      throw new CashuPaymentRequestError(
+        "invalid_request",
+        "Cashu payment request issuer options must be an object.",
+      );
+    }
+    this.mintPolicy = validateMintPolicy(options.mintPolicy);
+    this.operators = Object.freeze(normalizeOperatorRoutes(options.operators));
+    this.transportUrl = normalizeHttpsEndpoint(options.transportUrl, "transport");
+    ensureEncodedRequestBound(
+      encodeCashuPaymentRequest(
+        "i".repeat(128),
+        Number.MAX_SAFE_INTEGER,
+        this.operators,
+        this.transportUrl,
+      ),
+    );
+    Object.freeze(this);
+  }
+
+  issue(input: IssueCashuPaymentRequestInput): CashuPaymentRequestV1 {
+    if (typeof input !== "object" || input === null || Array.isArray(input)) {
+      throw new CashuPaymentRequestError(
+        "invalid_request",
+        "Cashu payment request input must be an object.",
+      );
+    }
+    const invoice = validateOpenInvoice(input.invoice);
+    try {
+      assertUnixTimestamp(input.issuedAt);
+    } catch {
+      throw new CashuPaymentRequestError(
+        "invalid_issued_at",
+        "Cashu payment request issue time is invalid.",
+      );
+    }
+    if (input.issuedAt < invoice.createdAt) {
+      throw new CashuPaymentRequestError(
+        "request_before_invoice",
+        "Payment request cannot be issued before invoice creation.",
+      );
+    }
+    if (input.issuedAt >= invoice.expiresAt) {
+      throw new CashuPaymentRequestError(
+        "invoice_expired",
+        "Payment request cannot be issued for an expired invoice.",
+      );
+    }
+
+    const encodedRequest = encodeCashuPaymentRequest(
+      invoice.id,
+      invoice.amount,
+      this.operators,
+      this.transportUrl,
+    );
+    ensureEncodedRequestBound(encodedRequest);
+
+    return Object.freeze({
+      amount: invoice.amount,
+      encodedRequest,
+      encoding: "creqA" as const,
+      expiresAt: invoice.expiresAt,
+      invoiceId: invoice.id,
+      issuedAt: input.issuedAt,
+      mintPolicy: this.mintPolicy,
+      operators: this.operators,
+      schemaVersion: CASHU_PAYMENT_REQUEST_SCHEMA_VERSION,
+      transportUrl: this.transportUrl,
+      unit: CASHU_UNIT,
+    });
+  }
+}
+
 export function createCashuPaymentRequestV1(
   input: CreateCashuPaymentRequestInput,
 ): CashuPaymentRequestV1 {
@@ -103,29 +191,16 @@ export function createCashuPaymentRequestV1(
       "Cashu payment request input must be an object.",
     );
   }
-  const invoice = validateOpenInvoice(input.invoice);
-  try {
-    assertUnixTimestamp(input.issuedAt);
-  } catch {
-    throw new CashuPaymentRequestError(
-      "invalid_issued_at",
-      "Cashu payment request issue time is invalid.",
-    );
-  }
-  if (input.issuedAt < invoice.createdAt) {
-    throw new CashuPaymentRequestError(
-      "request_before_invoice",
-      "Payment request cannot be issued before invoice creation.",
-    );
-  }
-  if (input.issuedAt >= invoice.expiresAt) {
-    throw new CashuPaymentRequestError(
-      "invoice_expired",
-      "Payment request cannot be issued for an expired invoice.",
-    );
-  }
+  const issuer = new CashuPaymentRequestIssuer({
+    ...(input.mintPolicy !== undefined && { mintPolicy: input.mintPolicy }),
+    operators: input.operators,
+    transportUrl: input.transportUrl,
+  });
+  return issuer.issue({ invoice: input.invoice, issuedAt: input.issuedAt });
+}
 
-  const mintPolicy = input.mintPolicy === undefined ? "strict" : input.mintPolicy;
+function validateMintPolicy(value: Nut18MintPolicy | undefined): "strict" {
+  const mintPolicy = value === undefined ? "strict" : value;
   if (!NUT18_MINT_POLICIES.includes(mintPolicy)) {
     throw new CashuPaymentRequestError("invalid_mint_policy", "NUT-18 mint policy is invalid.");
   }
@@ -135,37 +210,45 @@ export function createCashuPaymentRequestV1(
       "Advisory NUT-18 requests would promise acceptance of unlisted operators.",
     );
   }
+  return mintPolicy;
+}
 
-  const operators = normalizeOperatorRoutes(input.operators);
-  const transportUrl = normalizeHttpsEndpoint(input.transportUrl, "transport");
-  const request = PaymentRequest.builder()
-    .id(invoice.id)
-    .amount(invoice.amount, CASHU_UNIT)
-    .addMint(operators.map((operator) => operator.mintUrl))
-    .addSupportedMethod(STELLAR_METHOD)
-    .addHttpPostTransport(transportUrl)
-    .singleUse()
-    .build();
-  const encodedRequest = request.toEncodedCreqA();
-  if (encodedRequest.length > MAX_NUT18_ENCODED_LENGTH) {
+function normalizeEncodedCreqA(value: string): string {
+  if (!/^creqA[A-Za-z0-9+/_-]+={0,2}$/.test(value)) {
+    throw new CashuPaymentRequestError(
+      "encoding_failed",
+      "Cashu payment request encoder returned an invalid creqA value.",
+    );
+  }
+  return `creqA${value.slice(5).replaceAll("+", "-").replaceAll("/", "_")}`;
+}
+
+function encodeCashuPaymentRequest(
+  invoiceId: string,
+  amount: number,
+  operators: readonly AcceptedOperatorRouteV1[],
+  transportUrl: string,
+): string {
+  return normalizeEncodedCreqA(
+    PaymentRequest.builder()
+      .id(invoiceId)
+      .amount(amount, CASHU_UNIT)
+      .addMint(operators.map((operator) => operator.mintUrl))
+      .addSupportedMethod(STELLAR_METHOD)
+      .addHttpPostTransport(transportUrl)
+      .singleUse()
+      .build()
+      .toEncodedCreqA(),
+  );
+}
+
+function ensureEncodedRequestBound(value: string): void {
+  if (value.length > MAX_NUT18_ENCODED_LENGTH) {
     throw new CashuPaymentRequestError(
       "request_too_large",
       "Encoded payment request exceeds the CashMesh transport bound.",
     );
   }
-
-  return Object.freeze({
-    amount: invoice.amount,
-    encodedRequest,
-    encoding: "creqA",
-    expiresAt: invoice.expiresAt,
-    invoiceId: invoice.id,
-    issuedAt: input.issuedAt,
-    mintPolicy,
-    operators: Object.freeze(operators),
-    schemaVersion: CASHU_PAYMENT_REQUEST_SCHEMA_VERSION,
-    unit: CASHU_UNIT,
-  });
 }
 
 function validateOpenInvoice(invoice: OpenInvoiceV1): OpenInvoiceV1 {

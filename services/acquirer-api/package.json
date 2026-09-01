@@ -11,6 +11,7 @@
     "typecheck": "tsc --project tsconfig.json"
   },
   "dependencies": {
+    "@cashmesh/cashu": "workspace:*",
     "@cashmesh/domain": "workspace:*",
     "fastify": "5.12.1",
     "pg": "8.23.0"

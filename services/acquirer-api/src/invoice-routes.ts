@@ -81,11 +81,65 @@ const openInvoiceSchema = {
   },
 } as const;
 
+const cashuOperatorRouteSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["mintUrl", "mode", "operatorId", "reason", "tier"],
+  properties: {
+    mintUrl: { type: "string", format: "uri", maxLength: 512 },
+    mode: { type: "string", enum: ["trusted_hold", "immediate_conversion"] },
+    operatorId: { type: "string", pattern: IDENTIFIER_PATTERN },
+    reason: { type: "string", enum: ["trusted_operator", "conversion_required"] },
+    tier: { type: "string", enum: ["trusted", "convertible"] },
+  },
+} as const;
+
+const cashuPaymentRequestSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "amount",
+    "encodedRequest",
+    "encoding",
+    "expiresAt",
+    "invoiceId",
+    "issuedAt",
+    "mintPolicy",
+    "operators",
+    "schemaVersion",
+    "transportUrl",
+    "unit",
+  ],
+  properties: {
+    amount: { type: "integer", minimum: 1, maximum: MAX_SAFE_INTEGER },
+    encodedRequest: {
+      type: "string",
+      maxLength: 4_096,
+      pattern: "^creqA[A-Za-z0-9_-]+={0,2}$",
+    },
+    encoding: { type: "string", const: "creqA" },
+    expiresAt: { type: "integer", minimum: 0, maximum: MAX_SAFE_INTEGER },
+    invoiceId: { type: "string", pattern: IDENTIFIER_PATTERN },
+    issuedAt: { type: "integer", minimum: 0, maximum: MAX_SAFE_INTEGER },
+    mintPolicy: { type: "string", const: "strict" },
+    operators: {
+      type: "array",
+      minItems: 1,
+      maxItems: 16,
+      items: cashuOperatorRouteSchema,
+    },
+    schemaVersion: { type: "integer", const: 1 },
+    transportUrl: { type: "string", format: "uri", maxLength: 512 },
+    unit: { type: "string", const: "usdc" },
+  },
+} as const;
+
 const createInvoiceResponseSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["invoice", "replayed"],
+  required: ["cashuPaymentRequest", "invoice", "replayed"],
   properties: {
+    cashuPaymentRequest: cashuPaymentRequestSchema,
     invoice: openInvoiceSchema,
     replayed: { type: "boolean" },
   },
@@ -94,8 +148,11 @@ const createInvoiceResponseSchema = {
 const findInvoiceResponseSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["invoice"],
-  properties: { invoice: openInvoiceSchema },
+  required: ["cashuPaymentRequest", "invoice"],
+  properties: {
+    cashuPaymentRequest: cashuPaymentRequestSchema,
+    invoice: openInvoiceSchema,
+  },
 } as const;
 
 export function registerInvoiceRoutes(app: FastifyInstance, service: InvoiceService): void {
@@ -128,7 +185,11 @@ export function registerInvoiceRoutes(app: FastifyInstance, service: InvoiceServ
         .code(result.replayed ? 200 : 201)
         .header("idempotency-replayed", String(result.replayed))
         .header("location", location)
-        .send({ invoice: result.invoice, replayed: result.replayed });
+        .send({
+          cashuPaymentRequest: result.cashuPaymentRequest,
+          invoice: result.invoice,
+          replayed: result.replayed,
+        });
     },
   );
 
@@ -142,13 +203,13 @@ export function registerInvoiceRoutes(app: FastifyInstance, service: InvoiceServ
     },
     async (request, reply) => {
       reply.header("cache-control", "no-store");
-      const invoice = await service.find(request.params);
-      if (invoice === undefined) {
+      const result = await service.find(request.params);
+      if (result === undefined) {
         return reply.code(404).send({
           error: { code: "invoice_not_found", message: "Invoice was not found." },
         });
       }
-      return reply.send({ invoice });
+      return reply.send(result);
     },
   );
 }

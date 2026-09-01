@@ -74,6 +74,9 @@ importers:
 
   services/acquirer-api:
     dependencies:
+      '@cashmesh/cashu':
+        specifier: workspace:*
+        version: link:../../packages/cashu
       '@cashmesh/domain':
         specifier: workspace:*
         version: link:../../packages/domain

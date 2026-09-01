@@ -1,10 +1,12 @@
 # Merchant Accounting Contract
 
-**Status:** Domain contract and open-invoice persistence implemented; payment orchestration not implemented
+**Status:** Domain contract and Cashu-ready open-invoice persistence implemented; payment orchestration
+not implemented
 
 This document defines the first CashMesh merchant invoice and journal schemas. Domain behavior remains
-in `packages/domain`. The acquirer now persists open invoice issuance, but it does not accept Cashu
-proofs, call an operator, persist a paid-invoice journal, settle a merchant, or emit a receipt.
+in `packages/domain`. The acquirer now persists open invoice issuance and its strict NUT-18 request,
+but it does not accept Cashu proofs, call an operator, persist a paid-invoice journal, settle a
+merchant, or emit a receipt.
 
 ## Common Representation
 
@@ -114,9 +116,10 @@ payment, and journal identifiers are a required persistence invariant.
 
 - Open invoice creation and lookup are implemented with PostgreSQL; terminal invoice and journal
   persistence are not.
-- The invoice API does not yet attach the implemented NUT-18 request or accept its payment payload.
+- The invoice API attaches the strict NUT-18 request but does not accept its payment payload.
 - No proofs, DLEQ evidence, keysets, operator fee quotes, or spent state are validated.
-- No operator policy snapshot, cap decision, or suspension state is recorded yet.
+- The issued operator-policy snapshot is recorded; merchant-specific cap decisions and suspension
+  state are not.
 - No conversion, redemption, payout, refund, reversal, or chargeback entry exists.
 - No ledger balance query or accounting export exists.
 - No multi-currency or sub-cent accounting is supported.

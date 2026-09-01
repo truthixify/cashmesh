@@ -14,3 +14,4 @@ Current decisions:
 - [ADR-0005: Pair Invoice Acceptance with a Balanced Journal](0005-atomic-merchant-accounting.md)
 - [ADR-0006: Isolate the NUT-18 Request Adapter](0006-isolate-nut18-request-adapter.md)
 - [ADR-0007: Persist Invoice Issuance in PostgreSQL](0007-postgres-invoice-issuance.md)
+- [ADR-0008: Persist Cashu Request Snapshots with Invoices](0008-persist-cashu-request-snapshots.md)
