@@ -32,6 +32,8 @@ merchant balances, or move funds.
   proof-state-gated consumption, and evidence-gated release.
 - Validate a redacted bearer-proof bundle, encrypt it with reservation-bound AES-256-GCM custody, retain
   permanent key/nonce reuse evidence, and delete current ciphertext at terminal lifecycle state.
+- Create and check strict `stellar` NUT-05 melt quotes through a bounded, non-retrying HTTPS client
+  while binding every later observation to the original terms.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -69,7 +71,7 @@ frameworks adapt to it at the edges.
 | `apps/merchant-console/` | Next.js merchant operations reference client |
 | `services/acquirer-api/` | Fastify policy, durable invoice API, Cashu evidence, encrypted proof custody, and reservation lifecycle |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
-| `packages/cashu/` | NUT-18, bounded observation, proof integrity and fees, redacted bearer bundles, and interoperability fixtures |
+| `packages/cashu/` | NUT-18, bounded keyset/proof/quote clients, proof integrity and fees, redacted bearer bundles, and interoperability fixtures |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |
 | `docs/` | Architecture, protocol, security, roadmap, development, and ADRs |
 

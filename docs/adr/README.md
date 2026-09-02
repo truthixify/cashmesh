@@ -24,3 +24,4 @@ Current decisions:
 - [ADR-0015: Persist Payment-Scoped Cashu Proof-State Evidence](0015-persist-cashu-proof-state-evidence.md)
 - [ADR-0016: Manage Cashu Proof-Reservation Lifecycle](0016-manage-cashu-proof-reservation-lifecycle.md)
 - [ADR-0017: Protect Cashu Bearer Proofs in Encrypted Custody](0017-protect-cashu-bearer-proof-custody.md)
+- [ADR-0018: Bind Stellar Melt Quote Terms Before Dispatch](0018-bound-stellar-melt-quotes.md)

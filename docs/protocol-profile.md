@@ -142,6 +142,36 @@ observes the same hash before proceeding. Re-submitting an identical Stellar env
 second transaction effect, while a different hash is a hard conflict. Once an ambiguous result is
 durably recorded, automatic calls observe only and never create another payout.
 
+## Acquirer Quote Boundary
+
+`packages/cashu` now implements the client side of custom-method NUT-05 quote creation and checking.
+It sends the exact `{ amount, request, unit: "usdc" }` body to
+`POST /v1/melt/quote/stellar` on one configured HTTPS mint and checks only
+`GET /v1/melt/quote/stellar/{quote_id}`. The transport omits credentials, rejects redirects and endpoint
+substitution, bounds time and response bytes, supports cancellation, and performs no automatic retry.
+It does not assume NUT-19 response caching.
+
+Before the POST, the client validates the same permitted SEP-0007 parameter set, exact testnet network
+and USDC issuer, checksum-valid G- or M-address, 1 through 25,000 cent range, and exact integer-cent
+amount. It preserves the original URI for byte-for-byte response binding. The caller must still select
+the destination from server-owned merchant or settlement configuration; address validity alone is not
+payout authorization.
+
+A created quote must be `UNPAID`, unexpired, no more than 900 seconds from creation, and use a canonical
+UUIDv7. Its method, unit, request, amount, fee reserve, mint, and expiry are then immutable across
+checks. `PENDING` may return to
+`UNPAID` after a failed attempt, while `PAID` is terminal for the client. Current CDK generates UUIDv7
+for new quote IDs; the older UUID injected by one processor fixture is not accepted at this HTTP
+boundary. Responses are projected onto common quote fields. Payment preimages and unknown fields are
+discarded, and nonempty NUT-08 change fails closed until matching blinded-output data can be persisted.
+One shared deterministic response fixture is accepted by the TypeScript client and decoded by pinned
+CDK `MeltQuoteCustomResponse` types.
+
+This quote state is not settlement evidence. The client does not store the quote, decrypt proofs,
+execute a melt, interpret `PAID` as proof consumption, release a reservation, or write accounting. A
+future coordinator must persist one quote and exact dispatch intent before accessing bearer custody,
+then combine the operator outcome with the existing exact NUT-07 evidence rules.
+
 ## Durable Journal Scope
 
 The compatibility store writes a versioned JSON journal through write, file sync, atomic rename, and
@@ -171,6 +201,7 @@ Raw Horizon, CDK, filesystem, and signing details are not adopted as stable merc
 - origin-domain signing for SEP-0007 requests;
 - production database concurrency and encrypted envelope storage;
 - event-driven quote updates;
+- a running `cdk-mintd` interoperability test for the acquirer quote client;
 - fees, late-payment return, or sub-cent recovery policy;
 - multiple operators sharing a clearing or settlement store; and
 - NUT-18 payment payload receipt and proof acceptance; strict request construction is fixture-proven.
@@ -182,6 +213,9 @@ No mainnet transaction, funded testnet transaction, or public mint is authorized
 - [CDK `v0.18.0-rc.3` release](https://github.com/cashubtc/cdk/releases/tag/v0.18.0-rc.3)
 - [CDK custom-method gRPC work, PR #2275](https://github.com/cashubtc/cdk/pull/2275)
 - [Cashu NUT-01 units](https://github.com/cashubtc/nuts/blob/main/01.md)
+- [Cashu NUT-05 melt quotes and execution](https://github.com/cashubtc/nuts/blob/main/05.md)
+- [Cashu NUT-08 fee-return change](https://github.com/cashubtc/nuts/blob/main/08.md)
+- [Cashu NUT-19 cached responses](https://github.com/cashubtc/nuts/blob/main/19.md)
 - [SEP-0007 URI scheme](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0007.md)
 - [Stellar network identities](https://developers.stellar.org/docs/networks)
 - [Stellar consensus protocol](https://developers.stellar.org/docs/learn/fundamentals/stellar-consensus-protocol)

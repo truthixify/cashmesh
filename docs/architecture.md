@@ -58,8 +58,11 @@ The custody-specific validator can additionally return a redacted, explicitly se
 bundle after the same strict DLEQ verification. It strips DLEQ data and rejects spending conditions.
 A second source port and bounded HTTPS adapter can query NUT-07 with only those references, enforce an
 exact ordered response, discard witnesses, and return an immutable in-memory state snapshot. It does
-not persist or schedule state observations, change proof reservations, perform operator effects, or
-decide that an invoice has been paid.
+not persist or schedule state observations, change proof reservations, or decide that an invoice has
+been paid. A separate bounded NUT-05 client can create and check the custom `stellar` melt quote before
+bearer dispatch. It validates the exact testnet USDC SEP-0007 profile, accepts only current UUIDv7 quote
+identifiers, and binds every check to the original amount, request, fee, method, unit, mint, and expiry.
+It neither persists the quote nor presents proofs to the operator.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -148,6 +151,7 @@ acquirer-api ----------> PostgreSQL
 Cashu request adapter -> domain
 Cashu request adapter -> cashu-ts
 Cashu keyset client ---> configured operator HTTPS endpoint
+Cashu quote client ----> configured operator HTTPS endpoint
 Cashu processor ------> stellar-settlement
 Horizon reader -------> stellar-settlement
 future payout signer --> stellar-settlement
@@ -262,3 +266,4 @@ justify it.
 - [ADR-0015: Durable Cashu proof-state evidence](adr/0015-persist-cashu-proof-state-evidence.md)
 - [ADR-0016: Cashu proof-reservation lifecycle](adr/0016-manage-cashu-proof-reservation-lifecycle.md)
 - [ADR-0017: Encrypted Cashu bearer-proof custody](adr/0017-protect-cashu-bearer-proof-custody.md)
+- [ADR-0018: Bound Stellar melt quote terms](adr/0018-bound-stellar-melt-quotes.md)

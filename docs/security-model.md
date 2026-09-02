@@ -59,7 +59,10 @@ of Cashu or Stellar implementations.
 - One canonical dispatch fingerprint is bound to at most one local effect for a mint and effect kind.
 - Ambiguous operator evidence never releases proof or invoice claims.
 - Post-dispatch release requires a matching terminal failure and a later exact all-`UNSPENT` snapshot.
+- A checked melt quote may change state but never its mint, method, unit, request, amount, fee, identity,
+  or expiry; an observed `PAID` quote never regresses locally.
 - A melt cannot be released as unpaid before its bound quote expires.
+- A melt quote state never substitutes for exact reserved-proof state or matching effect evidence.
 - Consumption requires matching success and a later exact all-`SPENT` snapshot.
 - Merchant balances reconcile to immutable invoice and settlement references.
 - Reserve visibility and redemption probes never become a solvency guarantee.
@@ -75,6 +78,9 @@ of Cashu or Stellar implementations.
 | Proof release after ambiguous effect | Double redemption | `needs_attention` state and proof reservation |
 | One outbound operation bound to multiple payments | Conflicting recovery and double fulfillment | Unique mint, effect-kind, and dispatch-fingerprint binding |
 | Melt released while its quote remains payable | Double redemption | Bound quote expiry plus post-expiry `UNPAID` and later all-`UNSPENT` evidence |
+| Rebound or malformed Stellar melt quote | Wrong payout terms or unsafe recovery | Strict SEP-0007 request validation, UUIDv7 identity, immutable-term checks, and terminal `PAID` state |
+| Duplicate quote creation after timeout | Correlation and abandoned remote state | No automatic POST retry; future persistence must bind one creation attempt before retry policy |
+| Unhandled NUT-08 change | Lost recoverable value | Reject nonempty change until matching blinded-output data is durably recoverable |
 | Dishonest or insolvent operator | Merchant loss | Per-operator tiers, caps, conversion policy, suspension, diversification |
 | Forged merchant callback | Fulfillment without payment | Signed/replay-protected webhooks and merchant-side verification |
 | Cashier account compromise | Fraudulent invoice or refund | Least privilege, location scope, audit log, strong authentication |
@@ -112,6 +118,8 @@ CashMesh does not hide everything:
 
 - Stellar deposits and merchant settlements are public.
 - Operators see quote amount, time, completion, and redemption details.
+- A Stellar melt request reveals its destination, amount, asset tuple, memo if present, and check timing
+  to the selected operator.
 - The acquirer sees merchant, invoice, amount, operator, and settlement state.
 - A NUT-18 request reveals its invoice identifier, amount, accepted mints, and transport endpoint.
 - Stored or mint-queried NUT-07 `Y` references can correlate presentation attempts and queried proof
@@ -208,6 +216,15 @@ The lifecycle stores only sanitized identities, outcomes, timestamps, and state-
 It does not authenticate the outcome source, compute the canonical dispatch bytes, hold or send bearer
 proofs, call a mint, mark an invoice paid, or write a journal. A future adapter must keep secrets,
 signatures, DLEQ values, witnesses, tokens, and raw responses out of lifecycle storage and telemetry.
+
+A bounded Stellar quote client can create and check the current custom-method NUT-05 quote on one
+configured HTTPS mint. It validates the exact testnet asset, network, integer-cent amount, permitted
+SEP-0007 fields, and Stellar destination checksum before the POST. It accepts only complete current
+common fields, UUIDv7 identity, and an expiry inside the 900-second profile, then requires every check
+to match the original request, amount, fee, method, unit, mint, and expiry. It performs no automatic
+retry, discards undeclared fields and payment preimages, and rejects nonempty NUT-08 change. The quote
+and request are not yet persisted, and the client has no bearer-custody access, protected-mint
+authentication, execution method, lifecycle write, or accounting authority.
 
 A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. It binds
 the key ID and an exact reservation fingerprint as associated data, records every 96-bit nonce in an

@@ -46,8 +46,10 @@ security, legal, liquidity, and partner evidence.
   ambiguity, proof-state-gated consumption, and evidence-gated release.
 - Implemented: reservation-bound AES-256-GCM bearer custody, permanent key/nonce reuse evidence,
   scoped best-effort zeroization, and terminal ciphertext deletion.
-- Remaining: production key management, bounded swap/melt dispatch, and atomic paid-invoice plus
-  balanced-journal persistence.
+- Implemented: bounded custom `stellar` NUT-05 quote creation and checking with immutable term binding,
+  UUIDv7 identity, and no automatic retry.
+- Remaining: production key management, durable quote persistence, bounded swap/melt execution, and
+  atomic paid-invoice plus balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.

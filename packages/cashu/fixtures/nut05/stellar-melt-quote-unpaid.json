@@ -1,0 +1,10 @@
+{
+  "quote": "01890f3c-7b62-7a4f-bc7d-1a2b3c4d5e6f",
+  "method": "stellar",
+  "amount": 1234,
+  "fee_reserve": 0,
+  "state": "UNPAID",
+  "expiry": 1788300600,
+  "request": "web+stellar:pay?destination=GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4&amount=12.34&asset_code=USDC&asset_issuer=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5&memo=Y29ycmVsYXRpb24%3D&memo_type=MEMO_HASH&network_passphrase=Test+SDF+Network+%3B+September+2015",
+  "unit": "usdc"
+}
