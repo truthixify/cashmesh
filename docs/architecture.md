@@ -68,7 +68,10 @@ authorization before the request, performs no retry, and returns only matching c
 A separate acquirer repository persists one creation attempt per reserved payment before the POST,
 retains an ambiguous outcome without retry, and appends exact quote observations across restart. A
 melt lifecycle effect can start only from the same payment's matching, unexpired, currently `UNPAID`
-quote evidence. No application coordinator invokes the execution client yet.
+quote evidence. An internal acquirer coordinator selects the executor by the reservation's mint,
+derives input fees from its exact historical keyset snapshot, scopes custody decryption to the call,
+and authorizes the client only after a fresh effect insert. It records returned quote state plus
+`pending` or conservative attention without retrying or claiming proof consumption.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -94,10 +97,11 @@ evidence, pre-dispatch Stellar quote attempts and observations, an append-only r
 and reservation-bound encrypted bearer custody. The
 lifecycle binds one canonical dispatch fingerprint, preserves ambiguous effects, and requires matching
 exact proof-state evidence before consumption or release. Terminal lifecycle events delete current
-ciphertext transactionally while an
-append-only nonce-use record remains. These adapters are not wired into the endpoint. Production key
-management, operator dispatch, authentication, proof acceptance, and terminal invoice transitions are
-not yet implemented.
+ciphertext transactionally while an append-only nonce-use record remains. An internal coordinator can
+connect those records to one bounded zero-fee melt call for the reservation's configured mint and
+persists pending or ambiguous outcomes across restart. These capabilities are not wired into the
+payment endpoint. Production key management, protected-mint authentication, proof acceptance,
+recovery observation, and terminal invoice transitions are not yet implemented.
 
 ### Merchant Console
 
@@ -232,6 +236,9 @@ one creation authorization, binds one quote identity per mint, retains ambiguous
 state regression after `PAID`. The lifecycle repository and a database trigger require every new melt
 effect to match that payment's mint, quote ID, expiry, and dispatch-time `UNPAID` observation.
 Historical reads retain that binding while permitting later `PENDING` or `PAID` observations.
+The internal coordinator derives the fee from the exact historical keyset evidence, chooses a
+mint-specific executor, authorizes only a non-replayed effect, and records a returned quote observation
+or attention while leaving all proof claims active.
 Repositories reconstruct stored records through validated adapters before return. See the
 [merchant invoice API](invoice-api.md) for request and replay semantics.
 
@@ -283,3 +290,4 @@ justify it.
 - [ADR-0019: Durable Stellar melt quote evidence](adr/0019-persist-stellar-melt-quote-evidence.md)
 - [ADR-0020: Require quote evidence for melt effects](adr/0020-require-quote-evidence-for-melt-effects.md)
 - [ADR-0021: Authorize bounded zero-fee Stellar melt dispatch](adr/0021-authorize-zero-fee-stellar-melt-dispatch.md)
+- [ADR-0022: Coordinate one fresh Stellar melt dispatch](adr/0022-coordinate-fresh-stellar-melt-dispatch.md)

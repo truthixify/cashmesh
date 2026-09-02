@@ -1,14 +1,15 @@
 # Merchant Accounting Contract
 
-**Status:** Domain contract, Cashu-ready open-invoice persistence, proof-reservation lifecycle, and
-encrypted bearer custody implemented; payment orchestration not implemented
+**Status:** Domain contract, Cashu-ready open-invoice persistence, proof-reservation lifecycle,
+encrypted bearer custody, and internal melt dispatch implemented; payment acceptance and accounting
+orchestration not implemented
 
 This document defines the first CashMesh merchant invoice and journal schemas. Domain behavior remains
 in `packages/domain`. The acquirer now persists open invoice issuance and its strict NUT-18 request
 and can separately persist sanitized proof references after offline validation. It can hold the minimum
-spend bundle as reservation-bound authenticated ciphertext, but does not orchestrate validation through
-the HTTP route, dispatch proofs, accept payment, persist a paid-invoice journal, settle a merchant, or
-emit a receipt.
+spend bundle as reservation-bound authenticated ciphertext and internally coordinate one fresh
+zero-fee melt dispatch. It does not orchestrate validation through the HTTP route, accept payment,
+persist a paid-invoice journal, settle a merchant, or emit a receipt.
 
 ## Common Representation
 
@@ -124,8 +125,9 @@ payment, and journal identifiers are a required persistence invariant.
   reservation lifecycle, encrypted custody, and Stellar quote evidence exist as separate capabilities
   but are not payment orchestration.
 - A bounded client can create and check a `stellar` melt quote, and a repository persists one attempt,
-  outcome, and observation history per payment. The lifecycle and database enforce that record on a
-  melt effect, but no coordinator sends the encrypted bearer proofs to an operator.
+  outcome, and observation history per payment. An internal coordinator can derive the historical
+  input fee, authorize one fresh zero-fee melt effect, and record pending or attention outcomes. It is
+  not wired into payment acceptance and does not consume proofs or create accounting.
 - The issued operator-policy snapshot is recorded; merchant-specific cap decisions and suspension
   state are not.
 - No conversion, redemption, payout, refund, reversal, or chargeback entry exists.

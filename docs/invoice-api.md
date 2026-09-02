@@ -157,10 +157,10 @@ or submitted to an operator.
 
 The Cashu package has a deterministic offline proof validator and bounded NUT-07 observer. Separate
 acquirer repositories can load explicit keyset observations, reserve sanitized proof references,
-persist exact payment-scoped proof-state evidence, manage lifecycle claims, and encrypt the minimum
-spend bundle for an exact reservation. The HTTP service does not orchestrate them, and no component
-dispatches bearer proofs. Those internal capabilities are therefore intentionally not enough to change
-the endpoint response.
+persist exact payment-scoped proof-state evidence, manage lifecycle claims, encrypt the minimum spend
+bundle for an exact reservation, and coordinate one fresh zero-fee melt against stored quote evidence.
+The HTTP service does not orchestrate those capabilities. Internal dispatch is therefore intentionally
+not enough to change the endpoint response.
 
 | Status | Meaning |
 |---:|---|
@@ -251,8 +251,10 @@ identifiers. Exclude them from logs, metrics, traces, support artifacts, and mer
 
 Bearer-proof ciphertext is still custody. Logical terminal deletion does not guarantee physical erasure
 from PostgreSQL page history, WAL, replicas, snapshots, or backups, and the local key-provider port is
-not a production key-management implementation. Do not wire the scoped decryption callback to a mint
-until durable effect intent and canonical outbound request binding are part of the same coordinator.
+not a production key-management implementation. The internal melt coordinator wires scoped decryption
+to canonical outbound request binding only after a fresh durable effect insert. Do not expose that
+capability through this route until proof validation, recovery, terminal invoice accounting,
+authentication, and operational controls are also complete.
 
 Automatic HTTP access logs are disabled because request paths contain merchant and invoice identifiers.
 Do not enable framework request logging without replacing raw URLs with reviewed route templates and

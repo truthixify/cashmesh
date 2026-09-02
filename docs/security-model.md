@@ -249,8 +249,17 @@ quote amount plus the caller-supplied validated NUT-02 input fee. A domain-separ
 binds the normalized endpoint, method, and exact body. Only a strict authorization callback result can
 precede the one outbound request. The transport is credential-free, bounded, redirect-free, and
 non-retrying. Returned state is sanitized and immutable terms must match. The adapter does not prove
-that the callback wrote durable state, so only the future coordinator may supply that authorization.
+that the callback wrote durable state, so only the acquirer coordinator supplies that authorization.
 Any error after authorization remains recovery-sensitive.
+
+The coordinator loads reservation, lifecycle, quote, and the exact historical keyset evidence before
+opening custody. It derives NUT-02 fees from the reserved proof set, selects an executor by the bound
+mint URL, and returns authorization only for a fresh, non-replayed effect insert. Returned observations
+must fall between effect start and the coordinator's post-response clock. `PENDING` is persisted;
+transport ambiguity, invalid responses, unknown results, clock disagreement, or post-dispatch storage
+failure enter `needs_attention`. None of those paths releases proofs or permits an automatic retry, and
+`PAID` does not itself authorize consumption or merchant credit. If attention storage is unavailable,
+the already durable effect remains recovery-only rather than permitting redispatch.
 
 A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. It binds
 the key ID and an exact reservation fingerprint as associated data, records every 96-bit nonce in an
@@ -263,8 +272,8 @@ This does not make application memory, PostgreSQL, or backups non-custodial. Row
 physically erase old PostgreSQL page versions, WAL, replicas, snapshots, or backups. JavaScript byte
 wiping cannot erase immutable strings or undiscovered runtime copies. The built-in key-provider port has
 no production KMS or HSM adapter, access audit, per-record envelope key, or cryptographic-erasure
-mechanism. Decryption is also not dispatch authorization: the future coordinator must bind durable
-effect intent before it allows the execution client's authorization callback to return `true`.
+mechanism. Decryption alone is not dispatch authorization: the coordinator binds durable effect intent
+before it allows the execution client's authorization callback to return `true`.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

@@ -3,8 +3,8 @@
 **Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, offline
 proof-integrity validation, bounded public-key and proof-state observation, durable keyset and
 proof-state evidence, local proof-reference reservation, encrypted bearer custody, durable quote
-evidence, reservation lifecycle, and a zero-fee melt client implemented; coordinated operator dispatch
-and payment acceptance not implemented
+evidence, reservation lifecycle, and internal zero-fee melt coordination implemented; payment
+acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -239,7 +239,7 @@ this profile permits no fee reserve or change.
 
 Before network access, the client computes a domain-separated SHA-256 fingerprint over the normalized
 endpoint, method, and exact body bytes. Its authorization callback sees only frozen dispatch metadata
-and must return exactly `true`. The future coordinator may do so only when its matching lifecycle
+and must return exactly `true`. The acquirer coordinator does so only when its matching lifecycle
 effect was freshly inserted rather than replayed. Cancellation or expiry is checked again after that
 callback. The request omits credentials and referrers, rejects redirects and endpoint substitution,
 bounds time and response size, and never retries.
@@ -249,6 +249,27 @@ discarded, while nonempty change and unknown states fail closed. Any error after
 recovered from durable quote and proof observations rather than another melt call. The client does not
 load repository state, derive the input fee, authenticate protected mints, transition the lifecycle,
 delete custody, consume proofs, pay an invoice, or write accounting.
+
+## Melt Dispatch Coordinator
+
+The internal acquirer coordinator accepts only a payment ID and optional cancellation signal. It loads
+that payment's reservation and lifecycle first, then the exact quoted outcome and historical keyset
+observation. It sums `input_fee_ppk` once per reserved proof and rounds once, rejects keysets at
+`final_expiry`, and requires reserved gross value to equal the quote amount plus that fee. Inactive
+historical keysets remain valid for spending under NUT-02.
+
+Executors are registered by normalized mint URL, so the reservation selects the operator rather than a
+request caller. Custody opens only for that payment. Inside the bounded client's authorization callback,
+the coordinator validates the canonical dispatch, rechecks time and fee validity, and persists the
+matching melt effect. Only `replayed: false` authorizes the single POST. Existing, concurrent, or
+restarted effects return recovery without another network attempt.
+
+Valid response state is appended to the quote history. `PENDING` additionally records lifecycle
+pending. A transport failure, invalid response, missing result, clock disagreement, or persistence
+failure after authorization records `needs_attention` and retains the active claims. `UNPAID` and
+`PAID` remain observations; neither consumes proofs, releases the reservation, or credits a merchant.
+If lifecycle storage is unavailable, the effect remains recovery-only even though attention cannot be
+recorded immediately. This coordinator is not exposed by the payment endpoint.
 
 ## Proof-Reservation Lifecycle
 
@@ -274,13 +295,13 @@ below the repository.
 Starting a melt additionally requires the same payment's persisted quoted outcome, exact mint, quote
 ID and expiry, a latest `UNPAID` observation no later than the effect start, and a start before expiry.
 Stored lifecycle reconstruction validates that historical state while allowing later quote observations.
-Only the future coordinator may connect a fresh, non-replayed insertion to the execution client's
+Only the acquirer coordinator connects a fresh, non-replayed insertion to the execution client's
 authorization callback.
 
-This boundary stores sanitized effect evidence, not a trusted receipt. It does not authenticate a mint
-response, retain bearer proofs, send NUT-03 or NUT-05 requests, transition an invoice, write accounting,
-or change the public endpoint's rejection. The separate melt client computes the fingerprint, but no
-coordinator connects the two boundaries yet.
+This lifecycle boundary stores sanitized effect evidence, not a trusted receipt. The coordinator uses
+it to authorize one NUT-05 request and record pending or attention outcomes, but does not authenticate a
+protected mint, send NUT-03, consume proofs, transition an invoice, write accounting, or change the
+public endpoint's rejection.
 
 ## Encrypted Bearer-Proof Custody
 
@@ -306,9 +327,9 @@ immutable request strings, garbage-collected copies, or crash memory.
 A terminal `consumed` or `released` event deletes current ciphertext in the same database transaction.
 That is logical retention control, not guaranteed physical erasure from PostgreSQL page history, WAL,
 replicas, snapshots, or backups. No production KMS/HSM, envelope-key, access-audit, or
-cryptographic-erasure adapter exists. The scoped decryption API does not authorize network use; the
-future dispatch coordinator must persist the exact effect and request fingerprint before it lets the
-bounded NUT-05 client send proofs.
+cryptographic-erasure adapter exists. The scoped decryption API does not authorize network use by
+itself; the coordinator persists the exact effect and request fingerprint before it lets the bounded
+NUT-05 client send proofs.
 
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
@@ -328,16 +349,18 @@ operator redemption, or merchant settlement. Separate proof tests cover an offic
 deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. Keyset
 and proof-state observer tests cover stable metadata, exact request/response binding, unit filtering,
 concurrency, response bounds, transport timeouts, and failure paths entirely through local fixtures.
-Melt execution tests cover the exact proof body, canonical fingerprint, authorization ordering,
-redaction, expiry, amount binding, cancellation, transport bounds, and single-attempt failures through
+Melt execution and coordinator tests cover the exact proof body, canonical fingerprint, historical
+fee derivation, fresh-effect authorization, redaction, expiry, amount binding, cancellation, transport
+bounds, response clocks, operator routing, pending, attention, and single-attempt failures through
 mocked HTTP only.
 PostgreSQL tests cover restart, historical collision rejection, freshness bounds, exact keyset and
 proof-state binding, terminal state history, concurrent replay, proof-reference exclusion, append-only
 enforcement, reservation lifecycle recovery, dispatch ownership, ambiguity retention, evidence-gated
 release, encrypted custody restart and key rotation, key/nonce exclusion, ciphertext tamper detection,
-terminal deletion, rollback, and stored-record corruption. They do not prove endpoint authenticity, an
-appropriate production freshness policy, mint honesty, operator dispatch, redemption, or merchant
-settlement. Do not present a locally issued fixture request as payable.
+terminal deletion, rollback, stored-record corruption, and coordinator restart with encrypted custody.
+They do not prove endpoint authenticity, an appropriate production freshness policy, mint honesty,
+running-mint compatibility, redemption, or merchant settlement. Do not present a locally issued fixture
+request as payable.
 
 ## References
 
