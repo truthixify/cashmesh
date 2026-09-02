@@ -273,12 +273,13 @@ NUT-07 `Y` values are not spendable without their proof secrets, but they are st
 identifiers. Exclude them from logs, metrics, traces, support artifacts, and merchant-facing responses.
 
 Bearer-proof ciphertext is still custody. Logical terminal deletion does not guarantee physical erasure
-from PostgreSQL page history, WAL, replicas, snapshots, or backups, and the local key-provider port is
-not a production key-management implementation. The internal melt coordinator wires scoped decryption
-to canonical outbound request binding only after a fresh durable effect insert. Do not expose that
-capability through this route until proof-validation orchestration, authentication, recovery
-scheduling, and operational controls are also complete. The separate recovery coordinator cannot
-access custody or execution and therefore cannot authorize a second melt.
+from PostgreSQL page history, WAL, replicas, snapshots, or backups. Envelope-v2 records carry one
+wrapped data key behind a provider-neutral KMS/HSM port, but no production adapter, workload identity,
+provider policy, or access-audit integration exists. The internal melt coordinator wires scoped
+decryption to canonical outbound request binding only after a fresh durable effect insert. Do not
+expose that capability through this route until proof-validation orchestration, authentication,
+supervised recovery, and operational controls are also complete. The separate recovery coordinator
+cannot access custody or execution and therefore cannot authorize a second melt.
 
 Automatic HTTP access logs are disabled because request paths contain merchant and invoice identifiers.
 Do not enable framework request logging without replacing raw URLs with reviewed route templates and

@@ -22,12 +22,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 
 import {
   Aes256GcmCashuProofCustodyCipher,
+  type CashuProofCustodyCipher,
   type CashuProofCustodyKey,
   type CashuProofCustodyKeyId,
   type CashuProofCustodyKeyProvider,
   cashuProofCustodyKeyId,
   createCashuProofCustodyKey,
 } from "../src/cashu-proof-custody-cipher";
+import { EnvelopeAes256GcmCashuProofCustodyCipher } from "../src/cashu-proof-custody-envelope-cipher";
 import {
   cashuOperatorDispatchFingerprint,
   cashuOperatorEffectId,
@@ -39,6 +41,7 @@ import { PostgresCashuProofCustodyRepository } from "../src/postgres-cashu-proof
 import { PostgresCashuProofReservationLifecycleRepository } from "../src/postgres-cashu-proof-reservation-lifecycle-repository";
 import { PostgresCashuProofReservationRepository } from "../src/postgres-cashu-proof-reservation-repository";
 import { PostgresInvoiceRepository } from "../src/postgres-invoice-repository";
+import { FakeCashuProofCustodyDataKeyProvider } from "./fake-cashu-proof-custody-data-key-provider";
 
 const DATABASE_URL = process.env.CASHMESH_TEST_DATABASE_URL;
 const MINT_URL = "https://mint-a.cashmesh.example";
@@ -117,12 +120,19 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu bearer proof custo
     await seedReservation();
     const proofBundle = bundle();
     const expectedPlaintext = proofBundle.serializeForEncryption();
-    const firstRepository = await connectCustodyRepository(cipher([key("custody-key-a", 2)], 2));
+    const oldWrappingKey = key("wrapping-key-old", 2);
+    const firstProvider = new FakeCashuProofCustodyDataKeyProvider([oldWrappingKey], [31]);
+    const firstRepository = await connectCustodyRepository(envelopeCipher(firstProvider, 2));
     const stored = await firstRepository.store(custodyInput(proofBundle));
+    expect(firstProvider.generatedPlaintextKeys[0]).toEqual(new Uint8Array(32));
     await closeRepository(firstRepository);
 
+    const newWrappingKey = key("wrapping-key-new", 3);
     const restartedRepository = await connectCustodyRepository(
-      cipher([key("custody-key-a", 2)], 3),
+      envelopeCipher(
+        new FakeCashuProofCustodyDataKeyProvider([newWrappingKey, oldWrappingKey], [32]),
+        3,
+      ),
     );
     const metadata = await restartedRepository.findMetadata(paymentId("payment-001"));
     let retainedBundle: CashuBearerProofBundleV1 | undefined;
@@ -164,13 +174,34 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu bearer proof custo
       const row = await pool.query<{
         authentication_tag: Buffer;
         ciphertext: Buffer;
+        data_key_fingerprint: string;
+        encryption_algorithm: string;
+        key_id: string;
         nonce: Buffer;
-      }>("SELECT nonce, authentication_tag, ciphertext FROM cashu_bearer_proof_custody");
+        wrapped_data_key: Buffer;
+      }>(
+        `
+          SELECT
+            encryption_algorithm,
+            key_id,
+            nonce,
+            authentication_tag,
+            ciphertext,
+            data_key_fingerprint,
+            wrapped_data_key
+          FROM cashu_bearer_proof_custody
+        `,
+      );
       const encrypted = row.rows[0];
+      expect(encrypted?.encryption_algorithm).toBe("aes-256-gcm-envelope-v2");
+      expect(encrypted?.key_id).toBe("wrapping-key-old");
       expect(encrypted?.nonce).toHaveLength(12);
       expect(encrypted?.authentication_tag).toHaveLength(16);
+      expect(encrypted?.data_key_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(encrypted?.wrapped_data_key).toHaveLength(60);
       expect(encrypted?.ciphertext.includes(Buffer.from(PROOF_SECRET))).toBe(false);
       expect(encrypted?.ciphertext.includes(Buffer.from(KEYSET_PUBLIC_KEY))).toBe(false);
+      expect(encrypted?.wrapped_data_key.includes(Buffer.from(PROOF_SECRET))).toBe(false);
 
       const columns = await pool.query<{ column_name: string }>(`
         SELECT column_name
@@ -275,7 +306,98 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu bearer proof custo
     }
   });
 
-  it("reads historical keys after rotation and fails closed when the key is unavailable", async () => {
+  it("rejects reuse of one envelope data key across terminal payment histories", async () => {
+    await seedReservation();
+    const wrappingKey = key("wrapping-key-a", 18);
+    const provider = new FakeCashuProofCustodyDataKeyProvider([wrappingKey], [41, 41]);
+    const first = await connectCustodyRepository(envelopeCipher(provider, 21));
+    await first.store(custodyInput(bundle()));
+    const lifecycle = await connectLifecycleRepository();
+    await lifecycle.release({
+      eventId: cashuReservationLifecycleEventId("event-release"),
+      kind: "pre_dispatch",
+      paymentId: paymentId("payment-001"),
+      recordedAt: unixTimestamp(CUSTODY_AT + 1),
+    });
+    await seedReservation({ invoiceId: "invoice-002", paymentId: "payment-002" });
+    const second = await connectCustodyRepository(envelopeCipher(provider, 22));
+
+    await expect(
+      second.store(
+        custodyInput(bundle({ invoiceId: "invoice-002" }), { paymentId: "payment-002" }),
+      ),
+    ).rejects.toMatchObject({ code: "key_material_conflict" });
+    await expectCustodyCount(0);
+    await expectNonceCount(1);
+  });
+
+  it("rejects custody whose envelope identity differs from its permanent key-use record", async () => {
+    await seedReservation();
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query(`
+        INSERT INTO cashu_proof_custody_nonce_uses (
+          key_id,
+          nonce,
+          payment_id,
+          created_at,
+          encryption_algorithm,
+          data_key_fingerprint
+        ) VALUES (
+          'wrapping-key-direct',
+          decode(repeat('31', 12), 'hex'),
+          'payment-001',
+          ${CUSTODY_AT},
+          'aes-256-gcm-envelope-v2',
+          repeat('a', 64)
+        )
+      `);
+      const error = await errorFromAsync(() =>
+        pool.query(`
+          INSERT INTO cashu_bearer_proof_custody (
+            payment_id,
+            binding_fingerprint,
+            record_fingerprint,
+            schema_version,
+            encryption_algorithm,
+            key_id,
+            nonce,
+            authentication_tag,
+            ciphertext,
+            proof_count,
+            created_at,
+            data_key_fingerprint,
+            wrapped_data_key
+          ) VALUES (
+            'payment-001',
+            repeat('b', 64),
+            repeat('c', 64),
+            1,
+            'aes-256-gcm-envelope-v2',
+            'wrapping-key-direct',
+            decode(repeat('31', 12), 'hex'),
+            decode(repeat('32', 16), 'hex'),
+            decode('33', 'hex'),
+            1,
+            ${CUSTODY_AT},
+            repeat('d', 64),
+            decode('34', 'hex')
+          )
+        `),
+      );
+      expect(error).toMatchObject({
+        code: "23514",
+        message: "Cashu bearer proof custody key-use metadata is inconsistent",
+      });
+      await pool.query("ROLLBACK");
+    } finally {
+      await pool.query("ROLLBACK").catch(() => undefined);
+      await pool.end();
+    }
+  });
+
+  it("reads legacy v1 custody through the versioned cipher after key rotation", async () => {
     await seedReservation();
     const oldKey = key("custody-key-old", 6);
     const newKey = key("custody-key-new", 7);
@@ -283,7 +405,13 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu bearer proof custo
     await writer.store(custodyInput(bundle()));
     await closeRepository(writer);
 
-    const rotated = await connectCustodyRepository(cipher([newKey, oldKey], 9));
+    const wrappingProvider = new FakeCashuProofCustodyDataKeyProvider(
+      [key("wrapping-key-unused", 19)],
+      [42],
+    );
+    const rotated = await connectCustodyRepository(
+      envelopeCipher(wrappingProvider, 9, cipher([newKey, oldKey], 9)),
+    );
     const proofCount = await rotated.withDecryptedBundle(
       paymentId("payment-001"),
       (restored) => restored.proofCount,
@@ -291,7 +419,9 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu bearer proof custo
     expect(proofCount).toBe(1);
     await closeRepository(rotated);
 
-    const missing = await connectCustodyRepository(cipher([newKey], 10));
+    const missing = await connectCustodyRepository(
+      envelopeCipher(wrappingProvider, 10, cipher([newKey], 10)),
+    );
     await expect(
       missing.withDecryptedBundle(paymentId("payment-001"), () => undefined),
     ).rejects.toMatchObject({ code: "key_unavailable" });
@@ -325,6 +455,36 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu bearer proof custo
     } finally {
       await pool.end();
     }
+    await expect(
+      repository.withDecryptedBundle(paymentId("payment-001"), () => undefined),
+    ).rejects.toMatchObject({ code: "invalid_record" });
+  });
+
+  it("fails closed when stored envelope-key metadata is corrupted", async () => {
+    await seedReservation();
+    const provider = new FakeCashuProofCustodyDataKeyProvider([key("wrapping-key-a", 20)], [43]);
+    const repository = await connectCustodyRepository(envelopeCipher(provider, 23));
+    await repository.store(custodyInput(bundle()));
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query(
+        "ALTER TABLE cashu_bearer_proof_custody DISABLE TRIGGER cashu_bearer_proof_custody_guard_mutation",
+      );
+      try {
+        await pool.query(`
+          UPDATE cashu_bearer_proof_custody
+          SET wrapped_data_key = set_byte(wrapped_data_key, 0, get_byte(wrapped_data_key, 0) # 1)
+          WHERE payment_id = 'payment-001'
+        `);
+      } finally {
+        await pool.query(
+          "ALTER TABLE cashu_bearer_proof_custody ENABLE TRIGGER cashu_bearer_proof_custody_guard_mutation",
+        );
+      }
+    } finally {
+      await pool.end();
+    }
+
     await expect(
       repository.withDecryptedBundle(paymentId("payment-001"), () => undefined),
     ).rejects.toMatchObject({ code: "invalid_record" });
@@ -524,6 +684,18 @@ function cipher(keys: readonly CashuProofCustodyKey[], nonceFill: number) {
   });
 }
 
+function envelopeCipher(
+  provider: FakeCashuProofCustodyDataKeyProvider,
+  nonceFill: number,
+  legacyCipher?: CashuProofCustodyCipher,
+): EnvelopeAes256GcmCashuProofCustodyCipher {
+  return new EnvelopeAes256GcmCashuProofCustodyCipher({
+    dataKeyProvider: provider,
+    ...(legacyCipher !== undefined && { legacyCipher }),
+    randomBytes: () => new Uint8Array(12).fill(nonceFill),
+  });
+}
+
 function keyProvider(keys: readonly CashuProofCustodyKey[]): CashuProofCustodyKeyProvider {
   const active = keys[0];
   if (active === undefined) {
@@ -539,7 +711,7 @@ function keyProvider(keys: readonly CashuProofCustodyKey[]): CashuProofCustodyKe
 }
 
 async function connectCustodyRepository(
-  requestedCipher: Aes256GcmCashuProofCustodyCipher,
+  requestedCipher: CashuProofCustodyCipher,
 ): Promise<PostgresCashuProofCustodyRepository> {
   const repository = await PostgresCashuProofCustodyRepository.connect({
     cipher: requestedCipher,

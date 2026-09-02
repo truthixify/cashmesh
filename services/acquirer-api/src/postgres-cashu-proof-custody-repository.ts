@@ -20,8 +20,11 @@ import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
 import {
   CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM,
+  CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM,
+  CASHU_PROOF_CUSTODY_MAX_WRAPPED_DATA_KEY_BYTES,
   type CashuProofCustodyCipher,
   CashuProofCustodyCipherError,
+  type CashuProofCustodyEncryptionAlgorithm,
   type CashuProofCustodyKeyId,
   cashuProofCustodyKeyId,
 } from "./cashu-proof-custody-cipher";
@@ -62,6 +65,7 @@ interface CustodyRow extends QueryResultRow {
   readonly binding_fingerprint: string;
   readonly ciphertext: Buffer;
   readonly created_at: string;
+  readonly data_key_fingerprint: string | null;
   readonly encryption_algorithm: string;
   readonly key_id: string;
   readonly nonce: Buffer;
@@ -69,6 +73,7 @@ interface CustodyRow extends QueryResultRow {
   readonly proof_count: number;
   readonly record_fingerprint: string;
   readonly schema_version: number;
+  readonly wrapped_data_key: Buffer | null;
 }
 
 interface PostgresErrorShape {
@@ -92,15 +97,18 @@ interface ReservationScope {
 }
 
 interface StoredCustodyRecord {
+  readonly algorithm: CashuProofCustodyEncryptionAlgorithm;
   readonly authenticationTag: Uint8Array;
   readonly bindingFingerprint: string;
   readonly ciphertext: Uint8Array;
   readonly createdAt: UnixTimestamp;
+  readonly dataKeyFingerprint: string | null;
   readonly keyId: CashuProofCustodyKeyId;
   readonly nonce: Uint8Array;
   readonly paymentId: PaymentId;
   readonly proofCount: number;
   readonly recordFingerprint: string;
+  readonly wrappedDataKey: Uint8Array | null;
 }
 
 const RESERVATION_SELECT = `
@@ -143,7 +151,9 @@ const CUSTODY_SELECT = `
     authentication_tag,
     ciphertext,
     proof_count,
-    created_at
+    created_at,
+    data_key_fingerprint,
+    wrapped_data_key
   FROM cashu_bearer_proof_custody
 `;
 
@@ -249,25 +259,30 @@ export class PostgresCashuProofCustodyRepository implements CashuProofCustodyRep
         }
         const bindingFingerprint = createBindingFingerprint(reservation, validated.createdAt);
         const encrypted = await encryptForStorage(this.cipher, plaintext, bindingFingerprint);
-        const stored: StoredCustodyRecord = Object.freeze({
+        const dataKeyFingerprint =
+          encrypted.algorithm === CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM
+            ? encrypted.dataKeyFingerprint
+            : null;
+        const wrappedDataKey =
+          encrypted.algorithm === CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM
+            ? encrypted.wrappedDataKey
+            : null;
+        const recordFields = {
+          algorithm: encrypted.algorithm,
           authenticationTag: encrypted.authenticationTag,
           bindingFingerprint,
           ciphertext: encrypted.ciphertext,
           createdAt: validated.createdAt,
+          dataKeyFingerprint,
           keyId: encrypted.keyId,
           nonce: encrypted.nonce,
           paymentId: reservation.paymentId,
           proofCount: reservation.proofReferences.length,
-          recordFingerprint: createRecordFingerprint({
-            authenticationTag: encrypted.authenticationTag,
-            bindingFingerprint,
-            ciphertext: encrypted.ciphertext,
-            createdAt: validated.createdAt,
-            keyId: encrypted.keyId,
-            nonce: encrypted.nonce,
-            paymentId: reservation.paymentId,
-            proofCount: reservation.proofReferences.length,
-          }),
+          wrappedDataKey,
+        };
+        const stored: StoredCustodyRecord = Object.freeze({
+          ...recordFields,
+          recordFingerprint: createRecordFingerprint(recordFields),
         });
         await client.query(
           `
@@ -275,11 +290,20 @@ export class PostgresCashuProofCustodyRepository implements CashuProofCustodyRep
               key_id,
               nonce,
               payment_id,
-              created_at
+              created_at,
+              encryption_algorithm,
+              data_key_fingerprint
             )
-            VALUES ($1, $2, $3, $4)
+            VALUES ($1, $2, $3, $4, $5, $6)
           `,
-          [stored.keyId, Buffer.from(stored.nonce), stored.paymentId, stored.createdAt],
+          [
+            stored.keyId,
+            Buffer.from(stored.nonce),
+            stored.paymentId,
+            stored.createdAt,
+            stored.algorithm,
+            stored.dataKeyFingerprint,
+          ],
         );
         await client.query(
           `
@@ -294,22 +318,26 @@ export class PostgresCashuProofCustodyRepository implements CashuProofCustodyRep
               authentication_tag,
               ciphertext,
               proof_count,
-              created_at
+              created_at,
+              data_key_fingerprint,
+              wrapped_data_key
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           `,
           [
             stored.paymentId,
             stored.bindingFingerprint,
             stored.recordFingerprint,
             CASHU_PROOF_CUSTODY_SCHEMA_VERSION,
-            CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM,
+            stored.algorithm,
             stored.keyId,
             Buffer.from(stored.nonce),
             Buffer.from(stored.authenticationTag),
             Buffer.from(stored.ciphertext),
             stored.proofCount,
             stored.createdAt,
+            stored.dataKeyFingerprint,
+            stored.wrappedDataKey === null ? null : Buffer.from(stored.wrappedDataKey),
           ],
         );
         return Object.freeze({ metadata: metadataFrom(stored), replayed: false });
@@ -388,13 +416,7 @@ export class PostgresCashuProofCustodyRepository implements CashuProofCustodyRep
     let plaintext: Uint8Array;
     try {
       plaintext = await this.cipher.decrypt(
-        {
-          algorithm: CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM,
-          authenticationTag: record.authenticationTag,
-          ciphertext: record.ciphertext,
-          keyId: record.keyId,
-          nonce: record.nonce,
-        },
+        encryptedRecordFromStored(record),
         bindingAad(record.bindingFingerprint),
       );
     } catch (error) {
@@ -618,9 +640,12 @@ function assertBundleMatchesReservation(
 
 function mapStoredRecord(row: CustodyRow, reservation: ReservationScope): StoredCustodyRecord {
   try {
+    const isLegacy = row.encryption_algorithm === CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM;
+    const isEnvelope =
+      row.encryption_algorithm === CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM;
     if (
       row.schema_version !== CASHU_PROOF_CUSTODY_SCHEMA_VERSION ||
-      row.encryption_algorithm !== CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM ||
+      (!isLegacy && !isEnvelope) ||
       row.payment_id !== reservation.paymentId ||
       !Buffer.isBuffer(row.nonce) ||
       !Buffer.isBuffer(row.authentication_tag) ||
@@ -629,21 +654,32 @@ function mapStoredRecord(row: CustodyRow, reservation: ReservationScope): Stored
       row.authentication_tag.byteLength !== 16 ||
       row.ciphertext.byteLength === 0 ||
       row.ciphertext.byteLength > 65_536 ||
+      (isLegacy && (row.data_key_fingerprint !== null || row.wrapped_data_key !== null)) ||
+      (isEnvelope &&
+        (row.data_key_fingerprint === null ||
+          row.wrapped_data_key === null ||
+          !Buffer.isBuffer(row.wrapped_data_key) ||
+          row.wrapped_data_key.byteLength === 0 ||
+          row.wrapped_data_key.byteLength > CASHU_PROOF_CUSTODY_MAX_WRAPPED_DATA_KEY_BYTES)) ||
       !Number.isSafeInteger(row.proof_count) ||
       row.proof_count !== reservation.proofReferences.length
     ) {
       return failInvalidRecord();
     }
     const record: StoredCustodyRecord = Object.freeze({
+      algorithm: row.encryption_algorithm as CashuProofCustodyEncryptionAlgorithm,
       authenticationTag: Uint8Array.from(row.authentication_tag),
       bindingFingerprint: parseFingerprint(row.binding_fingerprint),
       ciphertext: Uint8Array.from(row.ciphertext),
       createdAt: unixTimestamp(parseSafeInteger(row.created_at)),
+      dataKeyFingerprint:
+        row.data_key_fingerprint === null ? null : parseFingerprint(row.data_key_fingerprint),
       keyId: cashuProofCustodyKeyId(row.key_id),
       nonce: Uint8Array.from(row.nonce),
       paymentId: paymentId(row.payment_id),
       proofCount: row.proof_count,
       recordFingerprint: parseFingerprint(row.record_fingerprint),
+      wrappedDataKey: row.wrapped_data_key === null ? null : Uint8Array.from(row.wrapped_data_key),
     });
     if (
       record.bindingFingerprint !== createBindingFingerprint(reservation, record.createdAt) ||
@@ -663,6 +699,30 @@ function mapStoredRecord(row: CustodyRow, reservation: ReservationScope): Stored
     }
     return failInvalidRecord();
   }
+}
+
+function encryptedRecordFromStored(record: StoredCustodyRecord) {
+  const common = {
+    authenticationTag: record.authenticationTag,
+    ciphertext: record.ciphertext,
+    keyId: record.keyId,
+    nonce: record.nonce,
+  };
+  if (record.algorithm === CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM) {
+    return {
+      ...common,
+      algorithm: CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM,
+    };
+  }
+  if (record.dataKeyFingerprint === null || record.wrappedDataKey === null) {
+    return failInvalidRecord();
+  }
+  return {
+    ...common,
+    algorithm: CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM,
+    dataKeyFingerprint: record.dataKeyFingerprint,
+    wrappedDataKey: record.wrappedDataKey,
+  };
 }
 
 async function encryptForStorage(
@@ -711,26 +771,48 @@ function createBindingFingerprint(reservation: ReservationScope, createdAt: Unix
 }
 
 function createRecordFingerprint(record: {
+  readonly algorithm: CashuProofCustodyEncryptionAlgorithm;
   readonly authenticationTag: Uint8Array;
   readonly bindingFingerprint: string;
   readonly ciphertext: Uint8Array;
   readonly createdAt: UnixTimestamp;
+  readonly dataKeyFingerprint: string | null;
   readonly keyId: CashuProofCustodyKeyId;
   readonly nonce: Uint8Array;
   readonly paymentId: PaymentId;
   readonly proofCount: number;
+  readonly wrappedDataKey: Uint8Array | null;
 }): string {
+  if (record.algorithm === CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM) {
+    return sha256({
+      algorithm: CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM,
+      authenticationTag: Buffer.from(record.authenticationTag).toString("base64"),
+      bindingFingerprint: record.bindingFingerprint,
+      ciphertext: Buffer.from(record.ciphertext).toString("base64"),
+      createdAt: record.createdAt,
+      keyId: record.keyId,
+      nonce: Buffer.from(record.nonce).toString("base64"),
+      paymentId: record.paymentId,
+      proofCount: record.proofCount,
+      schemaVersion: CASHU_PROOF_CUSTODY_SCHEMA_VERSION,
+    });
+  }
+  if (record.dataKeyFingerprint === null || record.wrappedDataKey === null) {
+    return failInvalidRecord();
+  }
   return sha256({
-    algorithm: CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM,
+    algorithm: CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM,
     authenticationTag: Buffer.from(record.authenticationTag).toString("base64"),
     bindingFingerprint: record.bindingFingerprint,
     ciphertext: Buffer.from(record.ciphertext).toString("base64"),
     createdAt: record.createdAt,
+    dataKeyFingerprint: record.dataKeyFingerprint,
     keyId: record.keyId,
     nonce: Buffer.from(record.nonce).toString("base64"),
     paymentId: record.paymentId,
     proofCount: record.proofCount,
     schemaVersion: CASHU_PROOF_CUSTODY_SCHEMA_VERSION,
+    wrappedDataKey: Buffer.from(record.wrappedDataKey).toString("base64"),
   });
 }
 
@@ -833,6 +915,15 @@ function mapStorageError(error: unknown): CashuProofCustodyRepositoryError {
     return new CashuProofCustodyRepositoryError(
       "nonce_conflict",
       "Cashu bearer proof encryption nonce was already used with this key.",
+    );
+  }
+  if (
+    databaseError.code === "23505" &&
+    databaseError.constraint === "cashu_proof_custody_nonce_uses_data_key_unique"
+  ) {
+    return new CashuProofCustodyRepositoryError(
+      "key_material_conflict",
+      "Cashu bearer proof data-key material was already used.",
     );
   }
   return storageUnavailable();

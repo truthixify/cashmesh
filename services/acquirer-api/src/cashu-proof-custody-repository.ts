@@ -37,6 +37,7 @@ export type CashuProofCustodyRepositoryErrorCode =
   | "invalid_input"
   | "invalid_record"
   | "invalid_reservation_state"
+  | "key_material_conflict"
   | "key_unavailable"
   | "nonce_conflict"
   | "reservation_not_found"

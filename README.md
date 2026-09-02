@@ -31,8 +31,9 @@ dispatch-capable melt client and must be treated as bearer-value code.
   `SPENT` history.
 - Persist an append-only proof-reservation lifecycle with dispatch identity, ambiguity retention,
   proof-state-gated consumption, and evidence-gated release.
-- Validate a redacted bearer-proof bundle, encrypt it with reservation-bound AES-256-GCM custody, retain
-  permanent key/nonce reuse evidence, and delete current ciphertext at terminal lifecycle state.
+- Validate a redacted bearer-proof bundle, encrypt it with reservation-bound AES-256-GCM custody, wrap
+  one data key per record behind a provider-neutral KMS/HSM port, retain permanent reuse evidence, and
+  delete current ciphertext plus its wrapped key at terminal lifecycle state.
 - Create and check strict `stellar` NUT-05 melt quotes through a bounded, non-retrying HTTPS client
   while binding every later observation to the original terms.
 - Persist one pre-dispatch Stellar quote attempt per payment, retain ambiguous creation without retry,

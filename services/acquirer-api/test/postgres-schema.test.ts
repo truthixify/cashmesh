@@ -1,10 +1,41 @@
-import { randomUUID } from "node:crypto";
+import { createHash, createSecretKey, randomUUID } from "node:crypto";
+import {
+  type CashuProofReferenceV1,
+  createCashuKeysetSnapshotV1,
+  validateCashuPaymentProofsForCustodyV1,
+} from "@cashmesh/cashu";
+import { paymentId } from "@cashmesh/domain";
 import { Pool, type PoolClient } from "pg";
 import { describe, expect, it } from "vitest";
 
+import {
+  Aes256GcmCashuProofCustodyCipher,
+  cashuProofCustodyKeyId,
+  createCashuProofCustodyKey,
+} from "../src/cashu-proof-custody-cipher";
+import { EnvelopeAes256GcmCashuProofCustodyCipher } from "../src/cashu-proof-custody-envelope-cipher";
+import { PostgresCashuProofCustodyRepository } from "../src/postgres-cashu-proof-custody-repository";
 import { applyPostgresMigrations } from "../src/postgres-schema";
 
 const DATABASE_URL = process.env.CASHMESH_TEST_DATABASE_URL;
+const LEGACY_CUSTODY_CREATED_AT = 102;
+const LEGACY_CUSTODY_INVOICE_ID = "invoice-v13";
+const LEGACY_CUSTODY_KEYSET_ID = "000f715baf5d4c2e";
+const LEGACY_CUSTODY_KEYSET_PUBLIC_KEY =
+  "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const LEGACY_CUSTODY_MINT_URL = "https://mint-v13.cashmesh.example";
+const LEGACY_CUSTODY_OPERATOR_ID = "operator-v13";
+const LEGACY_CUSTODY_PAYMENT_ID = "payment-v13";
+const LEGACY_CUSTODY_PROOF_DLEQ = {
+  e: "b31e58ac6527f34975ffab13e70a48b6d2b0d35abc4b03f0151f09ee1a9763d4",
+  r: "a6d13fcd7a18442e6076f5e1e7c887ad5de40a019824bdfa9fe740d302e8d861",
+  s: "8fbae004c59e754d71df67e392b6ae4e29293113ddc2ec86592a0431d16306d8",
+} as const;
+const LEGACY_CUSTODY_PROOF_SIGNATURE =
+  "024369d2d22a80ecf78f3937da9d5f30c1b9f74f0c32684d583cca0fa6a61cdcfc";
+const LEGACY_CUSTODY_PROOF_SECRET =
+  "daf4dd00a2b68a0858a80450f52c8a7d2ccf87d375e43e216e0c571f089f63e9";
+const LEGACY_CUSTODY_RESERVED_AT = 101;
 
 describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () => {
   it("refuses legacy consumed history without an explicit accounting backfill", async () => {
@@ -68,7 +99,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
     });
   });
 
-  it("migrates an empty v9 schema with authenticated routes and recovery scheduling", async () => {
+  it("migrates an empty v9 schema through recovery scheduling and envelope custody", async () => {
     await withTemporarySchema(async (client) => {
       await migrate(client, 9);
       await migrate(client);
@@ -105,13 +136,169 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
         `,
       );
       expect(state.rows[0]).toEqual({
-        latest_version: 13,
+        latest_version: 14,
         operator_count_nullable: "NO",
         operator_destination_nullable: "NO",
         quote_destination_nullable: "NO",
         recovery_jobs_exists: true,
         route_fingerprint_nullable: "NO",
       });
+    });
+  });
+
+  it("serializes a v13 custody writer and preserves its real v1 record", async () => {
+    await withTemporarySchema(async (migrator, schema) => {
+      await migrate(migrator, 13);
+      const fixture = await createLegacyCustodyFixture();
+      await seedV13CustodyReservation(migrator, fixture.proofReference);
+      const pool = new Pool({ connectionString: requireDatabaseUrl(), max: 2 });
+      const writer = await pool.connect();
+      const observer = await pool.connect();
+      let upgrade: Promise<void> | undefined;
+      try {
+        await writer.query(`SET search_path TO "${schema}"`);
+        await writer.query("BEGIN");
+        await writer.query(
+          `
+          INSERT INTO cashu_proof_custody_nonce_uses (
+            key_id, nonce, payment_id, created_at
+          ) VALUES ($1, $2, $3, $4)
+        `,
+          [
+            fixture.encrypted.keyId,
+            Buffer.from(fixture.encrypted.nonce),
+            LEGACY_CUSTODY_PAYMENT_ID,
+            LEGACY_CUSTODY_CREATED_AT,
+          ],
+        );
+
+        const backend = await migrator.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const pid = backend.rows[0]?.pid;
+        if (pid === undefined) {
+          throw new Error("Expected the migration backend identifier.");
+        }
+        await migrator.query("BEGIN");
+        await migrator.query("SET LOCAL statement_timeout = '5s'");
+        upgrade = applyPostgresMigrations(migrator);
+        await waitForBackendLock(observer, pid, "cashu_proof_custody_nonce_uses");
+
+        await writer.query(
+          `
+          INSERT INTO cashu_bearer_proof_custody (
+            payment_id,
+            binding_fingerprint,
+            record_fingerprint,
+            schema_version,
+            encryption_algorithm,
+            key_id,
+            nonce,
+            authentication_tag,
+            ciphertext,
+            proof_count,
+            created_at
+          ) VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $8, 1, $9)
+        `,
+          [
+            LEGACY_CUSTODY_PAYMENT_ID,
+            fixture.bindingFingerprint,
+            fixture.recordFingerprint,
+            fixture.encrypted.algorithm,
+            fixture.encrypted.keyId,
+            Buffer.from(fixture.encrypted.nonce),
+            Buffer.from(fixture.encrypted.authenticationTag),
+            Buffer.from(fixture.encrypted.ciphertext),
+            LEGACY_CUSTODY_CREATED_AT,
+          ],
+        );
+        await writer.query("COMMIT");
+        await upgrade;
+        await migrator.query("COMMIT");
+
+        const state = await migrator.query<{
+          custody_algorithm: string;
+          custody_data_key_fingerprint: string | null;
+          ciphertext_hex: string;
+          latest_version: number;
+          nonce_algorithm: string;
+          nonce_data_key_fingerprint: string | null;
+          record_fingerprint: string;
+          wrapped_data_key: Buffer | null;
+        }>(`
+        SELECT
+          custody.encryption_algorithm AS custody_algorithm,
+          custody.data_key_fingerprint AS custody_data_key_fingerprint,
+          encode(custody.ciphertext, 'hex') AS ciphertext_hex,
+          custody.record_fingerprint,
+          custody.wrapped_data_key,
+          nonce_use.encryption_algorithm AS nonce_algorithm,
+          nonce_use.data_key_fingerprint AS nonce_data_key_fingerprint,
+          (SELECT MAX(version) FROM cashmesh_schema_migrations) AS latest_version
+        FROM cashu_bearer_proof_custody AS custody
+        JOIN cashu_proof_custody_nonce_uses AS nonce_use
+          ON nonce_use.key_id = custody.key_id
+          AND nonce_use.nonce = custody.nonce
+          AND nonce_use.payment_id = custody.payment_id
+      `);
+        expect(state.rows[0]).toEqual({
+          custody_algorithm: "aes-256-gcm-v1",
+          custody_data_key_fingerprint: null,
+          ciphertext_hex: Buffer.from(fixture.encrypted.ciphertext).toString("hex"),
+          latest_version: 14,
+          nonce_algorithm: "aes-256-gcm-v1",
+          nonce_data_key_fingerprint: null,
+          record_fingerprint: fixture.recordFingerprint,
+          wrapped_data_key: null,
+        });
+
+        const reader = await PostgresCashuProofCustodyRepository.connect({
+          cipher: new EnvelopeAes256GcmCashuProofCustodyCipher({
+            dataKeyProvider: unavailableDataKeyProvider(),
+            legacyCipher: fixture.cipher,
+          }),
+          connectionString: databaseUrlForSchema(schema),
+          maxConnections: 1,
+        });
+        try {
+          const restored = await reader.withDecryptedBundle(
+            paymentId(LEGACY_CUSTODY_PAYMENT_ID),
+            (bundle) => bundle.serializeForEncryption(),
+          );
+          expect(restored).toEqual(fixture.plaintext);
+        } finally {
+          await reader.close();
+        }
+
+        const malformedEnvelope = await errorFromAsync(() =>
+          migrator.query(`
+          INSERT INTO cashu_proof_custody_nonce_uses (
+            key_id,
+            nonce,
+            payment_id,
+            created_at,
+            encryption_algorithm,
+            data_key_fingerprint
+          ) VALUES (
+            'wrapping-key-invalid',
+            decode(repeat('04', 12), 'hex'),
+            'payment-v13',
+            103,
+            'aes-256-gcm-envelope-v2',
+            NULL
+          )
+        `),
+        );
+        expect(malformedEnvelope).toMatchObject({ code: "23514" });
+      } finally {
+        fixture.plaintext.fill(0);
+        await writer.query("ROLLBACK").catch(() => undefined);
+        await migrator.query("ROLLBACK").catch(() => undefined);
+        if (upgrade !== undefined) {
+          await upgrade.catch(() => undefined);
+        }
+        writer.release();
+        observer.release();
+        await pool.end();
+      }
     });
   });
 
@@ -139,7 +326,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
         {
           effect_id: "effect-v12",
           initial_attempt_at: "163",
-          latest_version: 13,
+          latest_version: 14,
           payment_id: "payment-v12",
         },
       ]);
@@ -329,6 +516,256 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
     });
   });
 });
+
+async function createLegacyCustodyFixture() {
+  const bundle = validateCashuPaymentProofsForCustodyV1({
+    keysetSnapshot: createCashuKeysetSnapshotV1({
+      keysets: [
+        {
+          active: true,
+          id: LEGACY_CUSTODY_KEYSET_ID,
+          keys: { "1": LEGACY_CUSTODY_KEYSET_PUBLIC_KEY },
+          unit: "usdc",
+        },
+      ],
+      mintUrl: LEGACY_CUSTODY_MINT_URL,
+      observedAt: 100,
+    }),
+    rawPayload: JSON.stringify({
+      id: LEGACY_CUSTODY_INVOICE_ID,
+      mint: LEGACY_CUSTODY_MINT_URL,
+      proofs: [
+        {
+          C: LEGACY_CUSTODY_PROOF_SIGNATURE,
+          amount: 1,
+          dleq: LEGACY_CUSTODY_PROOF_DLEQ,
+          id: LEGACY_CUSTODY_KEYSET_ID,
+          secret: LEGACY_CUSTODY_PROOF_SECRET,
+        },
+      ],
+      unit: "usdc",
+    }),
+    validatedAt: 100,
+  }).bearerProofs;
+  try {
+    const proofReference = bundle.proofReferencesForBinding()[0];
+    if (proofReference === undefined) {
+      throw new Error("Expected one legacy custody proof reference.");
+    }
+    const plaintext = bundle.serializeForEncryption();
+    const bindingFingerprint = sha256({
+      createdAt: LEGACY_CUSTODY_CREATED_AT,
+      invoiceId: LEGACY_CUSTODY_INVOICE_ID,
+      mintUrl: LEGACY_CUSTODY_MINT_URL,
+      operatorId: LEGACY_CUSTODY_OPERATOR_ID,
+      paymentId: LEGACY_CUSTODY_PAYMENT_ID,
+      proofReferences: bundle.proofReferencesForBinding(),
+      reservedAt: LEGACY_CUSTODY_RESERVED_AT,
+      schemaVersion: 1,
+      unit: "usdc",
+    });
+    const custodyKey = createCashuProofCustodyKey(
+      cashuProofCustodyKeyId("legacy-custody-key"),
+      createSecretKey(new Uint8Array(32).fill(41)),
+    );
+    const cipher = new Aes256GcmCashuProofCustodyCipher({
+      keyProvider: {
+        activeKey: async () => custodyKey,
+        findKey: async (keyId) => (keyId === custodyKey.keyId ? custodyKey : undefined),
+      },
+      randomBytes: () => new Uint8Array(12).fill(1),
+    });
+    const encrypted = await cipher.encrypt(
+      plaintext,
+      Uint8Array.from(Buffer.from(bindingFingerprint, "hex")),
+    );
+    const recordFingerprint = sha256({
+      algorithm: encrypted.algorithm,
+      authenticationTag: Buffer.from(encrypted.authenticationTag).toString("base64"),
+      bindingFingerprint,
+      ciphertext: Buffer.from(encrypted.ciphertext).toString("base64"),
+      createdAt: LEGACY_CUSTODY_CREATED_AT,
+      keyId: encrypted.keyId,
+      nonce: Buffer.from(encrypted.nonce).toString("base64"),
+      paymentId: LEGACY_CUSTODY_PAYMENT_ID,
+      proofCount: 1,
+      schemaVersion: 1,
+    });
+    return Object.freeze({
+      bindingFingerprint,
+      cipher,
+      encrypted,
+      plaintext,
+      proofReference,
+      recordFingerprint,
+    });
+  } finally {
+    bundle.destroy();
+  }
+}
+
+async function seedV13CustodyReservation(
+  client: PoolClient,
+  proofReference: CashuProofReferenceV1,
+): Promise<void> {
+  await client.query("BEGIN");
+  try {
+    await client.query(`
+      INSERT INTO merchant_invoices (
+        id, merchant_id, schema_version, unit, amount, created_at, expires_at, state
+      ) VALUES ('invoice-v13', 'merchant-v13', 1, 'usdc', 1, 100, 300, 'open')
+    `);
+    await client.query(`
+      INSERT INTO invoice_cashu_requests (
+        invoice_id,
+        merchant_id,
+        schema_version,
+        encoded_request,
+        encoding,
+        issued_at,
+        mint_policy,
+        transport_url,
+        operator_count,
+        route_set_fingerprint
+      ) VALUES (
+        'invoice-v13',
+        'merchant-v13',
+        1,
+        'creqAabc',
+        'creqA',
+        100,
+        'strict',
+        'https://pay.cashmesh.example/v1/cashu/payments',
+        1,
+        repeat('1', 64)
+      )
+    `);
+    await client.query(`
+      INSERT INTO invoice_cashu_request_operators (
+        invoice_id,
+        merchant_id,
+        position,
+        operator_id,
+        mint_url,
+        mode,
+        tier,
+        reason,
+        settlement_destination
+      ) VALUES (
+        'invoice-v13',
+        'merchant-v13',
+        0,
+        'operator-v13',
+        'https://mint-v13.cashmesh.example',
+        'immediate_conversion',
+        'trusted',
+        'trusted_operator',
+        'GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4'
+      )
+    `);
+    await client.query(
+      `
+        INSERT INTO cashu_keysets (
+          mint_url,
+          keyset_id,
+          unit,
+          input_fee_ppk,
+          final_expiry,
+          keys,
+          identity_fingerprint
+        ) VALUES ($1, $2, 'usdc', 0, NULL, $3::jsonb, repeat('2', 64))
+      `,
+      [
+        LEGACY_CUSTODY_MINT_URL,
+        LEGACY_CUSTODY_KEYSET_ID,
+        JSON.stringify({ "1": LEGACY_CUSTODY_KEYSET_PUBLIC_KEY }),
+      ],
+    );
+    await client.query(
+      `
+        INSERT INTO cashu_keyset_observations (
+          snapshot_fingerprint,
+          operator_id,
+          mint_url,
+          unit,
+          schema_version,
+          observed_at
+        ) VALUES (repeat('3', 64), $1, $2, 'usdc', 1, 100)
+      `,
+      [LEGACY_CUSTODY_OPERATOR_ID, LEGACY_CUSTODY_MINT_URL],
+    );
+    await client.query(
+      `
+        INSERT INTO cashu_keyset_observation_entries (
+          snapshot_fingerprint, mint_url, unit, position, keyset_id, active
+        ) VALUES (repeat('3', 64), $1, 'usdc', 0, $2, TRUE)
+      `,
+      [LEGACY_CUSTODY_MINT_URL, LEGACY_CUSTODY_KEYSET_ID],
+    );
+    await client.query(
+      `
+        INSERT INTO cashu_proof_reservations (
+          payment_id,
+          reservation_fingerprint,
+          invoice_id,
+          operator_id,
+          mint_url,
+          unit,
+          schema_version,
+          keyset_observed_at,
+          reserved_at,
+          gross_amount
+        ) VALUES ($1, repeat('4', 64), $2, $3, $4, 'usdc', 1, 100, $5, 1)
+      `,
+      [
+        LEGACY_CUSTODY_PAYMENT_ID,
+        LEGACY_CUSTODY_INVOICE_ID,
+        LEGACY_CUSTODY_OPERATOR_ID,
+        LEGACY_CUSTODY_MINT_URL,
+        LEGACY_CUSTODY_RESERVED_AT,
+      ],
+    );
+    await client.query(
+      `
+        INSERT INTO cashu_reserved_proofs (
+          payment_id, mint_url, unit, position, proof_y, keyset_id, amount
+        ) VALUES ($1, $2, 'usdc', 0, $3, $4, $5)
+      `,
+      [
+        LEGACY_CUSTODY_PAYMENT_ID,
+        LEGACY_CUSTODY_MINT_URL,
+        proofReference.y,
+        proofReference.keysetId,
+        proofReference.amount,
+      ],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+}
+
+function unavailableDataKeyProvider() {
+  return {
+    generateDataKey: async () => {
+      throw new Error("Envelope writes are not expected in the legacy migration fixture.");
+    },
+    unwrapDataKey: async () => {
+      throw new Error("Envelope reads are not expected in the legacy migration fixture.");
+    },
+  };
+}
+
+function databaseUrlForSchema(schema: string): string {
+  const url = new URL(requireDatabaseUrl());
+  url.searchParams.set("options", `-c search_path=${schema}`);
+  return url.toString();
+}
+
+function sha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
 
 async function withTemporarySchema(
   action: (client: PoolClient, schema: string) => Promise<void>,
@@ -851,7 +1288,7 @@ async function waitForBackendLock(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(
-    `Accounting migration did not wait for concurrent ${relationName} writer; observed ${observedRelations.join(", ") || "no relation lock"}.`,
+    `Migration did not wait for concurrent ${relationName} writer; observed ${observedRelations.join(", ") || "no relation lock"}.`,
   );
 }
 

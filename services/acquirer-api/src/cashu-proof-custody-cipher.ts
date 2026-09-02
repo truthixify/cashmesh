@@ -7,8 +7,15 @@ import {
 import { assertIdentifier } from "@cashmesh/domain";
 
 export const CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM = "aes-256-gcm-v1" as const;
+export const CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM = "aes-256-gcm-envelope-v2" as const;
+export const CASHU_PROOF_CUSTODY_DATA_KEY_BYTES = 32;
+export const CASHU_PROOF_CUSTODY_MAX_WRAPPED_DATA_KEY_BYTES = 16_384;
 export const CASHU_PROOF_CUSTODY_NONCE_BYTES = 12;
 export const CASHU_PROOF_CUSTODY_TAG_BYTES = 16;
+
+export type CashuProofCustodyEncryptionAlgorithm =
+  | typeof CASHU_PROOF_CUSTODY_ENCRYPTION_ALGORITHM
+  | typeof CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM;
 
 const MAX_AAD_BYTES = 4_096;
 const MAX_CIPHERTEXT_BYTES = 65_536;
@@ -36,9 +43,21 @@ export interface EncryptedCashuProofBundleV1 {
   readonly nonce: Uint8Array;
 }
 
+export interface EncryptedCashuProofBundleV2 {
+  readonly algorithm: typeof CASHU_PROOF_CUSTODY_ENVELOPE_ENCRYPTION_ALGORITHM;
+  readonly authenticationTag: Uint8Array;
+  readonly ciphertext: Uint8Array;
+  readonly dataKeyFingerprint: string;
+  readonly keyId: CashuProofCustodyKeyId;
+  readonly nonce: Uint8Array;
+  readonly wrappedDataKey: Uint8Array;
+}
+
+export type EncryptedCashuProofBundle = EncryptedCashuProofBundleV1 | EncryptedCashuProofBundleV2;
+
 export interface CashuProofCustodyCipher {
-  decrypt(record: EncryptedCashuProofBundleV1, aad: Uint8Array): Promise<Uint8Array>;
-  encrypt(plaintext: Uint8Array, aad: Uint8Array): Promise<EncryptedCashuProofBundleV1>;
+  decrypt(record: EncryptedCashuProofBundle, aad: Uint8Array): Promise<Uint8Array>;
+  encrypt(plaintext: Uint8Array, aad: Uint8Array): Promise<EncryptedCashuProofBundle>;
 }
 
 export type CashuProofCustodyCipherErrorCode =
@@ -123,7 +142,7 @@ export class Aes256GcmCashuProofCustodyCipher implements CashuProofCustodyCipher
     }
   }
 
-  async decrypt(record: EncryptedCashuProofBundleV1, aad: Uint8Array): Promise<Uint8Array> {
+  async decrypt(record: EncryptedCashuProofBundle, aad: Uint8Array): Promise<Uint8Array> {
     validateEncryptedRecord(record);
     validateBytes(aad, 1, MAX_AAD_BYTES);
     let key: CashuProofCustodyKey | undefined;
@@ -150,7 +169,7 @@ export class Aes256GcmCashuProofCustodyCipher implements CashuProofCustodyCipher
       });
       decipher.setAAD(createBoundAad(record.keyId, aad));
       decipher.setAuthTag(record.authenticationTag);
-      return Uint8Array.from(Buffer.concat([decipher.update(record.ciphertext), decipher.final()]));
+      return decryptAuthenticated(decipher, record.ciphertext);
     } catch {
       throw new CashuProofCustodyCipherError(
         "integrity_failed",
@@ -196,7 +215,7 @@ function validateKey(value: CashuProofCustodyKey): CashuProofCustodyKey {
 }
 
 function validateEncryptedRecord(
-  value: EncryptedCashuProofBundleV1,
+  value: EncryptedCashuProofBundle,
 ): asserts value is EncryptedCashuProofBundleV1 {
   try {
     if (
@@ -232,6 +251,23 @@ function validateBytes(value: Uint8Array, minimum: number, maximum: number): voi
 
 function createBoundAad(keyId: CashuProofCustodyKeyId, aad: Uint8Array): Buffer {
   return Buffer.concat([ENCRYPTION_CONTEXT, Buffer.from(keyId, "ascii"), Buffer.of(0), aad]);
+}
+
+function decryptAuthenticated(
+  decipher: ReturnType<typeof createDecipheriv>,
+  ciphertext: Uint8Array,
+): Uint8Array {
+  let updated: Buffer | undefined;
+  let finalized: Buffer | undefined;
+  try {
+    updated = decipher.update(ciphertext);
+    finalized = decipher.final();
+    const plaintext = Buffer.concat([updated, finalized]);
+    return new Uint8Array(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
+  } finally {
+    updated?.fill(0);
+    finalized?.fill(0);
+  }
 }
 
 function invalidCipherInput(): CashuProofCustodyCipherError {

@@ -112,10 +112,11 @@ ciphertext transactionally while an append-only nonce-use record remains. An int
 connect those records to one bounded zero-fee melt call for the reservation's configured mint and
 persists pending or ambiguous outcomes across restart. Confirmed immediate-conversion melts can be
 accounted internally in one transaction, but successful swaps remain blocked without replacement-proof
-custody. Fenced recovery jobs and a bounded one-shot worker exist, but no supervisor starts them. These
-capabilities are not wired into the payment endpoint. Production key management, protected-mint
-authentication, proof-validation orchestration, worker supervision, and public terminal invoice flows
-are not yet implemented.
+custody. The envelope cipher writes one wrapped AES data key per record through a provider-neutral
+KMS/HSM port, while an explicit legacy reader preserves v1 records. Fenced recovery jobs and a bounded
+one-shot worker exist, but no supervisor starts them. These capabilities are not wired into the payment
+endpoint. A production key-service adapter, protected-mint authentication, proof-validation
+orchestration, worker supervision, and public terminal invoice flows are not yet implemented.
 
 ### Merchant Console
 
@@ -251,9 +252,11 @@ binds every complete observation to that exact reservation, preserves terminal `
 also requires a caller-supplied freshness interval. The lifecycle repository stores immutable effect
 and transition evidence, keeps ambiguous claims active, and removes claims only for a proven release.
 The custody repository stores only authenticated ciphertext and metadata, binds decryption to the exact
-reservation, rejects key/nonce reuse across terminal histories, and exposes plaintext only through a
-self-destroying callback. Its local AES adapter uses a key-provider port; no production KMS or HSM
-adapter exists. The quote repository requires that custody and the active reservation before it grants
+reservation, and exposes plaintext only through a self-destroying callback. Legacy v1 rows retain their
+original record identity and permanent key/nonce evidence. New v2 rows use one data key per record,
+authenticate their wrapping metadata, and permanently reject a repeated data-key fingerprint. The
+wrapping port supports versioned KMS/HSM keys, but no production provider adapter or credential policy
+exists. The quote repository requires that custody and the active reservation before it grants
 one creation authorization, binds the SEP-0007 destination to the server-owned immediate-conversion
 route, binds one quote identity per mint, retains ambiguous creation, and prevents state regression
 after `PAID`. The lifecycle repository and a database trigger require every new melt effect to match
@@ -336,3 +339,4 @@ justify it.
 - [ADR-0023: Atomically account confirmed Stellar melt payments](adr/0023-atomically-account-stellar-melt-payments.md)
 - [ADR-0024: Bind Stellar destinations and recover melts without redispatch](adr/0024-bind-stellar-destinations-and-recover-melts.md)
 - [ADR-0025: Schedule melt recovery with fenced leases](adr/0025-schedule-melt-recovery-with-fenced-leases.md)
+- [ADR-0026: Wrap per-record Cashu custody data keys](adr/0026-wrap-cashu-custody-data-keys.md)

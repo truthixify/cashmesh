@@ -46,6 +46,9 @@ security, legal, liquidity, and partner evidence.
   ambiguity, proof-state-gated consumption, and evidence-gated release.
 - Implemented: reservation-bound AES-256-GCM bearer custody, permanent key/nonce reuse evidence,
   scoped best-effort zeroization, and terminal ciphertext deletion.
+- Implemented: a versioned envelope-custody boundary with one wrapped data key per record, authenticated
+  wrapping context, permanent data-key reuse detection, legacy v1 reads, and migration without
+  ciphertext rewriting.
 - Implemented: bounded custom `stellar` NUT-05 quote creation and checking with immutable term binding,
   UUIDv7 identity, and no automatic retry.
 - Implemented: durable pre-dispatch quote attempts, single-POST authorization, ambiguity retention,
@@ -66,8 +69,9 @@ security, legal, liquidity, and partner evidence.
 - Implemented: one immutable recovery job per melt effect, append-only fenced worker leases and
   outcomes, v12 backfill, bounded exponential observation retry, and sticky escalation through an
   internal one-shot worker.
-- Remaining: production key management, bounded swap execution with replacement-proof custody,
-  supervised recovery process wiring, and public payment-acceptance orchestration.
+- Remaining: a deployed and audited KMS/HSM adapter with workload identity and access operations,
+  bounded swap execution with replacement-proof custody, supervised recovery process wiring, and
+  public payment-acceptance orchestration.
 - Remaining: public verified NUT-18 payment acceptance and advisory mint support after catch-all
   conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.

@@ -3384,6 +3384,110 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 13,
   }),
+  Object.freeze({
+    name: "envelope_cashu_proof_custody_keys",
+    sql: `
+      LOCK TABLE
+        cashu_proof_custody_nonce_uses,
+        cashu_bearer_proof_custody
+        IN ACCESS EXCLUSIVE MODE;
+
+      ALTER TABLE cashu_proof_custody_nonce_uses
+        ADD COLUMN encryption_algorithm TEXT NOT NULL DEFAULT 'aes-256-gcm-v1',
+        ADD COLUMN data_key_fingerprint CHAR(64),
+        ADD CONSTRAINT cashu_proof_custody_nonce_uses_algorithm CHECK (
+          encryption_algorithm IN ('aes-256-gcm-v1', 'aes-256-gcm-envelope-v2')
+        ),
+        ADD CONSTRAINT cashu_proof_custody_nonce_uses_envelope_shape CHECK (
+          (
+            encryption_algorithm = 'aes-256-gcm-v1'
+            AND data_key_fingerprint IS NULL
+          )
+          OR (
+            encryption_algorithm = 'aes-256-gcm-envelope-v2'
+            AND data_key_fingerprint IS NOT NULL
+            AND data_key_fingerprint ~ '^[0-9a-f]{64}$'
+          )
+        );
+
+      CREATE UNIQUE INDEX cashu_proof_custody_nonce_uses_data_key_unique
+        ON cashu_proof_custody_nonce_uses (data_key_fingerprint)
+        WHERE data_key_fingerprint IS NOT NULL;
+
+      ALTER TABLE cashu_bearer_proof_custody
+        ADD COLUMN data_key_fingerprint CHAR(64),
+        ADD COLUMN wrapped_data_key BYTEA,
+        DROP CONSTRAINT cashu_bearer_proof_custody_algorithm,
+        ADD CONSTRAINT cashu_bearer_proof_custody_algorithm CHECK (
+          encryption_algorithm IN ('aes-256-gcm-v1', 'aes-256-gcm-envelope-v2')
+        ),
+        ADD CONSTRAINT cashu_bearer_proof_custody_envelope_shape CHECK (
+          (
+            encryption_algorithm = 'aes-256-gcm-v1'
+            AND data_key_fingerprint IS NULL
+            AND wrapped_data_key IS NULL
+          )
+          OR (
+            encryption_algorithm = 'aes-256-gcm-envelope-v2'
+            AND data_key_fingerprint IS NOT NULL
+            AND data_key_fingerprint ~ '^[0-9a-f]{64}$'
+            AND wrapped_data_key IS NOT NULL
+            AND OCTET_LENGTH(wrapped_data_key) > 0
+            AND OCTET_LENGTH(wrapped_data_key) <= 16384
+          )
+        );
+
+      CREATE FUNCTION cashmesh_validate_cashu_proof_custody_key_use()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        nonce_algorithm TEXT;
+        nonce_data_key_fingerprint CHAR(64);
+      BEGIN
+        SELECT encryption_algorithm, data_key_fingerprint
+          INTO nonce_algorithm, nonce_data_key_fingerprint
+        FROM cashu_proof_custody_nonce_uses
+        WHERE key_id = NEW.key_id
+          AND nonce = NEW.nonce
+          AND payment_id = NEW.payment_id;
+
+        IF NOT FOUND
+          OR nonce_algorithm IS DISTINCT FROM NEW.encryption_algorithm
+          OR nonce_data_key_fingerprint IS DISTINCT FROM NEW.data_key_fingerprint
+        THEN
+          RAISE EXCEPTION 'Cashu bearer proof custody key-use metadata is inconsistent'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_bearer_proof_custody_key_use_valid
+        BEFORE INSERT ON cashu_bearer_proof_custody
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_proof_custody_key_use();
+
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+          FROM cashu_bearer_proof_custody AS custody
+          JOIN cashu_proof_custody_nonce_uses AS nonce_use
+            ON nonce_use.key_id = custody.key_id
+            AND nonce_use.nonce = custody.nonce
+            AND nonce_use.payment_id = custody.payment_id
+          WHERE nonce_use.encryption_algorithm IS DISTINCT FROM custody.encryption_algorithm
+            OR nonce_use.data_key_fingerprint IS DISTINCT FROM custody.data_key_fingerprint
+        ) THEN
+          RAISE EXCEPTION 'Cashu bearer proof custody key-use backfill is inconsistent'
+            USING ERRCODE = 'check_violation';
+        END IF;
+      END
+      $$;
+    `,
+    version: 14,
+  }),
 ]);
 
 export async function applyPostgresMigrations(

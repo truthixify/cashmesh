@@ -103,7 +103,7 @@ of Cashu or Stellar implementations.
 | Forged merchant callback | Fulfillment without payment | Signed/replay-protected webhooks and merchant-side verification |
 | Cashier account compromise | Fraudulent invoice or refund | Least privilege, location scope, audit log, strong authentication |
 | Bearer-proof leakage | Direct value theft | Redacted handles, authenticated encrypted custody, scoped decryption, and terminal deletion |
-| AES-GCM nonce reuse or ciphertext rebinding | Proof disclosure or substituted bearer value | Permanent key/nonce registry plus exact reservation metadata as associated data |
+| AES-GCM key or nonce reuse, or ciphertext rebinding | Proof disclosure or substituted bearer value | Permanent v1 key/nonce history, unique v2 data-key fingerprints, and exact envelope plus reservation metadata as associated data |
 | DLEQ blinding factor forwarded to a mint | Issuance-to-spend correlation | Verify before custody and strip DLEQ from the stored spend bundle |
 | Injected payment metadata | Secret or personal data retained in accounting | Project only declared schema fields into durable domain records |
 | Wrong-merchant journal | Misstated merchant liability | Bind merchant in the reference and require one matching payable credit |
@@ -316,19 +316,27 @@ explicitly reviewed backfill before upgrade.
 The following destination migration also refuses every existing issued request rather than guessing
 whether a historical address was server-authorized.
 
-A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. It binds
-the key ID and an exact reservation fingerprint as associated data, records every 96-bit nonce in an
-append-only key/nonce registry, permits only immutable pre-dispatch custody, and deletes the current
-ciphertext in the transaction that records `consumed` or `released`. It reconstructs plaintext only
-inside a callback whose bundle is destroyed afterward. Restored bundles cannot be resubmitted as newly
-validated input, and spending conditions are rejected before custody.
+A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. Each
+envelope-cipher write obtains one plaintext data key and wrapped copy per record through a
+provider-neutral key-service port. The content cipher authenticates the algorithm, wrapping-key
+version, wrapped-key digest, data-key fingerprint, and exact reservation binding. The provider receives
+a non-secret derived context that its adapter must authenticate. Plaintext data-key buffers are
+overwritten after encrypt or unwrap, and the append-only history rejects both legacy key/nonce reuse
+and any repeated v2 data-key fingerprint. Existing v1 ciphertext remains readable only through an
+explicitly configured legacy provider and is not rewritten during migration.
+
+Custody permits only immutable pre-dispatch rows and deletes current ciphertext plus its wrapped data
+key in the transaction that records `consumed` or `released`. It reconstructs plaintext only inside a
+callback whose bundle is destroyed afterward. Restored bundles cannot be resubmitted as newly validated
+input, and spending conditions are rejected before custody.
 
 This does not make application memory, PostgreSQL, or backups non-custodial. Row deletion does not
 physically erase old PostgreSQL page versions, WAL, replicas, snapshots, or backups. JavaScript byte
-wiping cannot erase immutable strings or undiscovered runtime copies. The built-in key-provider port has
-no production KMS or HSM adapter, access audit, per-record envelope key, or cryptographic-erasure
-mechanism. Decryption alone is not dispatch authorization: the coordinator binds durable effect intent
-before it allows the execution client's authorization callback to return `true`.
+wiping cannot erase immutable strings, native-library copies, or undiscovered runtime copies. The
+envelope port does not supply a production KMS/HSM adapter, workload identity, provider-side policy,
+access audit, alerting, rotation runbook, or backup-erasure mechanism. Decryption alone is not dispatch
+authorization: the coordinator binds durable effect intent before it allows the execution client's
+authorization callback to return `true`.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

@@ -359,9 +359,12 @@ redacted; plaintext requires an explicit method.
 The PostgreSQL custody repository accepts only a bundle created by that initial validation path and
 only for the exact active pre-dispatch reservation. It encrypts canonical bytes with AES-256-GCM, a
 random 96-bit nonce, a 128-bit tag, and associated data derived from the payment, invoice, operator,
-mint, unit, reservation time, proof references, and custody time. One immutable ciphertext row is
-allowed per payment. A permanent key/nonce registry prevents reuse even after the current ciphertext is
-deleted, and active plus historical keys are obtained through a key-provider port.
+mint, unit, reservation time, proof references, and custody time. New v2 writes obtain one plaintext
+data key and wrapped copy per record through a provider-neutral KMS/HSM port. They additionally
+authenticate the algorithm, wrapping-key version, wrapped-key digest, and data-key fingerprint. A
+permanent unique fingerprint rejects accidental data-key reuse after current ciphertext is deleted.
+Legacy v1 ciphertext and record fingerprints remain readable through an explicitly supplied historical
+key provider; migration does not decrypt or rewrite them.
 
 Exact concurrent storage retries converge; changed terms conflict. Retrieval decrypts only inside a
 callback and destroys the restored byte array afterward, including on callback failure. The caller owns
@@ -370,10 +373,10 @@ immutable request strings, garbage-collected copies, or crash memory.
 
 A terminal `consumed` or `released` event deletes current ciphertext in the same database transaction.
 That is logical retention control, not guaranteed physical erasure from PostgreSQL page history, WAL,
-replicas, snapshots, or backups. No production KMS/HSM, envelope-key, access-audit, or
-cryptographic-erasure adapter exists. The scoped decryption API does not authorize network use by
-itself; the coordinator persists the exact effect and request fingerprint before it lets the bounded
-NUT-05 client send proofs.
+replicas, snapshots, or backups. The envelope interface is not a production key deployment: no concrete
+KMS/HSM adapter, workload identity, provider access policy, audit integration, or backup-erasure process
+exists. The scoped decryption API does not authorize network use by itself; the coordinator persists the
+exact effect and request fingerprint before it lets the bounded NUT-05 client send proofs.
 
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
@@ -401,7 +404,8 @@ PostgreSQL tests cover restart, historical collision rejection, freshness bounds
 proof-state binding, terminal state history, concurrent replay, proof-reference exclusion, append-only
 enforcement, reservation lifecycle recovery, dispatch ownership, ambiguity retention, evidence-gated
 release, atomic paid-melt accounting, journal balance and position enforcement, encrypted custody
-restart and key rotation, key/nonce exclusion, ciphertext tamper detection, terminal deletion,
+restart and wrapping-key rotation, legacy reads, key/nonce and data-key exclusion, ciphertext and
+envelope-metadata tamper detection, terminal deletion,
 rollback, stored-record corruption, and coordinator restart with encrypted custody.
 They also cover automatic melt-job creation, v12 backfill, due-time selection, concurrent row skipping,
 lease expiry and fencing, retry replay, sticky attention, terminal lifecycle priority, and direct-writer
