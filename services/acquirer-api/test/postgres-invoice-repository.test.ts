@@ -64,6 +64,8 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
       await pool.query(
         `
           TRUNCATE
+            cashu_bearer_proof_custody,
+            cashu_proof_custody_nonce_uses,
             cashu_proof_reservation_events,
             cashu_active_invoice_payment_claims,
             cashu_operator_effects,

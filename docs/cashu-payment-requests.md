@@ -125,8 +125,9 @@ result contains no secret, signature, DLEQ, witness, or memo.
 
 NUT-12's proof-side DLEQ includes the payer's blinding factor. It is needed for receiver-side
 verification but must not be sent back to the mint because that would reveal the link between issuance
-and spend. The metadata-only return prevents accidental forwarding in this capability; future proof
-custody and operator adapters must preserve the same boundary.
+and spend. The metadata-only return prevents accidental forwarding. The custody-specific validator
+creates a separate redacted handle only after the same DLEQ check and strips the DLEQ before encryption;
+a future operator adapter must preserve that boundary.
 
 This function is not wired into the HTTP route yet. A snapshot is unauthenticated observation evidence,
 not a freshness guarantee, and offline cryptography cannot establish NUT-07 `UNSPENT` state. The public
@@ -232,6 +233,34 @@ This boundary stores sanitized effect evidence, not a trusted receipt. It does n
 canonical dispatch fingerprint, authenticate a mint response, retain bearer proofs, send NUT-03 or
 NUT-05 requests, transition an invoice, write accounting, or change the public endpoint's rejection.
 
+## Encrypted Bearer-Proof Custody
+
+The custody-specific proof validator returns the ordinary metadata result plus a
+`CashuBearerProofBundleV1`. The bundle stores only invoice, mint, unit, and sorted proof amount, keyset
+ID, secret, signature, and derived `Y`. It excludes raw payload, memo, DLEQ, witness, and undeclared
+fields. Any witness or well-known NUT-10 secret is rejected until CashMesh has a dedicated
+spending-condition verifier. JSON serialization, runtime inspection, and string conversion are
+redacted; plaintext requires an explicit method.
+
+The PostgreSQL custody repository accepts only a bundle created by that initial validation path and
+only for the exact active pre-dispatch reservation. It encrypts canonical bytes with AES-256-GCM, a
+random 96-bit nonce, a 128-bit tag, and associated data derived from the payment, invoice, operator,
+mint, unit, reservation time, proof references, and custody time. One immutable ciphertext row is
+allowed per payment. A permanent key/nonce registry prevents reuse even after the current ciphertext is
+deleted, and active plus historical keys are obtained through a key-provider port.
+
+Exact concurrent storage retries converge; changed terms conflict. Retrieval decrypts only inside a
+callback and destroys the restored byte array afterward, including on callback failure. The caller owns
+and must promptly destroy the initial validated bundle. These wipes reduce exposure but cannot erase
+immutable request strings, garbage-collected copies, or crash memory.
+
+A terminal `consumed` or `released` event deletes current ciphertext in the same database transaction.
+That is logical retention control, not guaranteed physical erasure from PostgreSQL page history, WAL,
+replicas, snapshots, or backups. No production KMS/HSM, envelope-key, access-audit, or
+cryptographic-erasure adapter exists. The scoped decryption API does not authorize network use; a future
+dispatch coordinator must first persist the exact effect and request fingerprint before it gives proofs
+to a bounded NUT-03 or NUT-05 adapter.
+
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
 and support artifacts. Avoid putting customer identity or secrets into invoice identifiers or URLs.
@@ -253,18 +282,21 @@ concurrency, response bounds, transport timeouts, and failure paths entirely thr
 PostgreSQL tests cover restart, historical collision rejection, freshness bounds, exact keyset and
 proof-state binding, terminal state history, concurrent replay, proof-reference exclusion, append-only
 enforcement, reservation lifecycle recovery, dispatch ownership, ambiguity retention, evidence-gated
-release, rollback, and stored-record corruption. They do not prove endpoint authenticity, an
+release, encrypted custody restart and key rotation, key/nonce exclusion, ciphertext tamper detection,
+terminal deletion, rollback, and stored-record corruption. They do not prove endpoint authenticity, an
 appropriate production freshness policy, mint honesty, operator dispatch, redemption, or merchant
 settlement. Do not present a locally issued fixture request as payable.
 
 ## References
 
 - [Cashu NUT-18 payment requests](https://github.com/cashubtc/nuts/blob/main/18.md)
+- [Cashu basic notation and proofs](https://github.com/cashubtc/nuts/blob/main/00.md)
 - [Cashu NUT-01 mint public keys](https://github.com/cashubtc/nuts/blob/main/01.md)
 - [Cashu NUT-02 keysets and fees](https://github.com/cashubtc/nuts/blob/main/02.md)
 - [Cashu NUT-03 swap](https://github.com/cashubtc/nuts/blob/main/03.md)
 - [Cashu NUT-05 melt](https://github.com/cashubtc/nuts/blob/main/05.md)
 - [Cashu NUT-07 proof state](https://github.com/cashubtc/nuts/blob/main/07.md)
+- [Cashu NUT-11 spending conditions](https://github.com/cashubtc/nuts/blob/main/11.md)
 - [Cashu NUT-12 DLEQ proofs](https://github.com/cashubtc/nuts/blob/main/12.md)
 - [Cashu NUT-21 clear authentication](https://github.com/cashubtc/nuts/blob/main/21.md)
 - [Cashu NUT-22 blind authentication](https://github.com/cashubtc/nuts/blob/main/22.md)

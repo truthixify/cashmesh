@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import {
   Amount,
   blindMessage,
@@ -15,12 +16,16 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  CashuBearerProofBundleError,
   type CashuKeysetSnapshotEntryInputV1,
   CashuKeysetSnapshotError,
   CashuProofReferenceError,
   CashuProofValidationError,
   createCashuKeysetSnapshotV1,
   createCashuProofReferenceV1,
+  isCashuBearerProofBundleValidatedForInitialCustodyV1,
+  restoreCashuBearerProofBundleV1,
+  validateCashuPaymentProofsForCustodyV1,
   validateCashuPaymentProofsV1,
 } from "../src";
 
@@ -277,6 +282,84 @@ describe("validateCashuPaymentProofsV1", () => {
     });
 
     expect(result).toMatchObject({ grossAmount: 7, inputFee: 1, netAmount: 6 });
+  });
+
+  it("creates an explicitly serializable bearer bundle while redacting ordinary output", () => {
+    const fixture = testKeyset(7, 0);
+    const proofs = [
+      createProof(fixture, 8, "test-only-custody-a", 251n),
+      createProof(fixture, 4, "test-only-custody-b", 252n),
+    ];
+    const result = validateCashuPaymentProofsForCustodyV1({
+      keysetSnapshot: snapshotFrom([fixture.entry]),
+      rawPayload: paymentPayload(proofs),
+      validatedAt: NOW,
+    });
+
+    expect(result.validation).toMatchObject({ grossAmount: 12, netAmount: 12, proofCount: 2 });
+    expect(JSON.stringify(result)).not.toMatch(/test-only-custody|"signature"|"dleq"|"witness"/i);
+    expect(inspect(result.bearerProofs)).not.toMatch(/test-only-custody|signature|dleq|witness/i);
+    expect(String(result.bearerProofs)).toBe("CashuBearerProofBundleV1 [REDACTED]");
+
+    const plaintext = result.bearerProofs.serializeForEncryption();
+    const stored = JSON.parse(new TextDecoder().decode(plaintext)) as {
+      readonly proofs: readonly Record<string, unknown>[];
+    };
+    expect(stored.proofs.map((proof) => Object.keys(proof).sort())).toEqual([
+      ["amount", "keysetId", "secret", "signature", "y"],
+      ["amount", "keysetId", "secret", "signature", "y"],
+    ]);
+    expect(JSON.stringify(stored)).toContain("test-only-custody-a");
+    expect(JSON.stringify(stored)).not.toMatch(/dleq|witness/i);
+
+    const restored = restoreCashuBearerProofBundleV1(plaintext);
+    expect(result.bearerProofs.isValidatedForInitialCustody()).toBe(true);
+    expect(isCashuBearerProofBundleValidatedForInitialCustodyV1(result.bearerProofs)).toBe(true);
+    expect(restored.isValidatedForInitialCustody()).toBe(false);
+    expect(isCashuBearerProofBundleValidatedForInitialCustodyV1(restored)).toBe(false);
+    const forged = Object.assign(Object.create(Object.getPrototypeOf(result.bearerProofs)), {
+      isValidatedForInitialCustody: () => true,
+    });
+    expect(isCashuBearerProofBundleValidatedForInitialCustodyV1(forged)).toBe(false);
+    expect(restored.serializeForEncryption()).toEqual(plaintext);
+    result.bearerProofs.destroy();
+    expect(isCashuBearerProofBundleValidatedForInitialCustodyV1(result.bearerProofs)).toBe(false);
+    expect(() => result.bearerProofs.serializeForEncryption()).toThrow(CashuBearerProofBundleError);
+  });
+
+  it("rejects spending conditions and non-canonical restored plaintext", () => {
+    const fixture = testKeyset(7, 0);
+    const ordinary = createProof(fixture, 8, "test-only-custody", 261n);
+    const structured = createProof(fixture, 8, '["P2PK",{"data":"test-only-unsupported"}]', 262n);
+
+    expect(
+      validationError(() =>
+        validateCashuPaymentProofsForCustodyV1({
+          keysetSnapshot: snapshotFrom([fixture.entry]),
+          rawPayload: paymentPayload([{ ...ordinary, witness: '{"signatures":[]}' }]),
+          validatedAt: NOW,
+        }),
+      ),
+    ).toMatchObject({ code: "unsupported_spending_condition" });
+    expect(
+      validationError(() =>
+        validateCashuPaymentProofsForCustodyV1({
+          keysetSnapshot: snapshotFrom([fixture.entry]),
+          rawPayload: paymentPayload([structured]),
+          validatedAt: NOW,
+        }),
+      ),
+    ).toMatchObject({ code: "unsupported_spending_condition" });
+
+    const valid = validateCashuPaymentProofsForCustodyV1({
+      keysetSnapshot: snapshotFrom([fixture.entry]),
+      rawPayload: paymentPayload([ordinary]),
+      validatedAt: NOW,
+    }).bearerProofs.serializeForEncryption();
+    const nonCanonical = new TextEncoder().encode(` ${new TextDecoder().decode(valid)}`);
+    expect(validationError(() => restoreCashuBearerProofBundleV1(nonCanonical))).toMatchObject({
+      code: "invalid_bundle",
+    });
   });
 
   it("requires DLEQ and rejects a tampered signature", () => {

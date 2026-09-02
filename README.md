@@ -30,6 +30,8 @@ merchant balances, or move funds.
   `SPENT` history.
 - Persist an append-only proof-reservation lifecycle with dispatch identity, ambiguity retention,
   proof-state-gated consumption, and evidence-gated release.
+- Validate a redacted bearer-proof bundle, encrypt it with reservation-bound AES-256-GCM custody, retain
+  permanent key/nonce reuse evidence, and delete current ciphertext at terminal lifecycle state.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -65,9 +67,9 @@ frameworks adapt to it at the edges.
 | Path | Responsibility |
 |---|---|
 | `apps/merchant-console/` | Next.js merchant operations reference client |
-| `services/acquirer-api/` | Fastify policy, durable invoice API, Cashu evidence, and proof-reservation lifecycle |
+| `services/acquirer-api/` | Fastify policy, durable invoice API, Cashu evidence, encrypted proof custody, and reservation lifecycle |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
-| `packages/cashu/` | NUT-18, bounded keyset and proof-state observation, proof integrity, fees, and proof-reference adapter plus interoperability fixture |
+| `packages/cashu/` | NUT-18, bounded observation, proof integrity and fees, redacted bearer bundles, and interoperability fixtures |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |
 | `docs/` | Architecture, protocol, security, roadmap, development, and ADRs |
 

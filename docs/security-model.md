@@ -54,6 +54,8 @@ of Cashu or Stellar implementations.
 - An issued invoice, encoded request, transport, and operator-policy snapshot commit atomically.
 - An unverified payment envelope never returns success, reserves value, or changes invoice state.
 - Offline proof integrity never substitutes for mint-observed unspent state or durable reservation.
+- Bearer-proof plaintext enters durable storage only as reservation-bound authenticated ciphertext.
+- One AES-GCM key and nonce pair is never reused, including after terminal ciphertext deletion.
 - One canonical dispatch fingerprint is bound to at most one local effect for a mint and effect kind.
 - Ambiguous operator evidence never releases proof or invoice claims.
 - Post-dispatch release requires a matching terminal failure and a later exact all-`UNSPENT` snapshot.
@@ -76,7 +78,9 @@ of Cashu or Stellar implementations.
 | Dishonest or insolvent operator | Merchant loss | Per-operator tiers, caps, conversion policy, suspension, diversification |
 | Forged merchant callback | Fulfillment without payment | Signed/replay-protected webhooks and merchant-side verification |
 | Cashier account compromise | Fraudulent invoice or refund | Least privilege, location scope, audit log, strong authentication |
-| Bearer-proof leakage | Direct value theft | Never log proofs, encrypt local storage, minimize handling |
+| Bearer-proof leakage | Direct value theft | Redacted handles, authenticated encrypted custody, scoped decryption, and terminal deletion |
+| AES-GCM nonce reuse or ciphertext rebinding | Proof disclosure or substituted bearer value | Permanent key/nonce registry plus exact reservation metadata as associated data |
+| DLEQ blinding factor forwarded to a mint | Issuance-to-spend correlation | Verify before custody and strip DLEQ from the stored spend bundle |
 | Injected payment metadata | Secret or personal data retained in accounting | Project only declared schema fields into durable domain records |
 | Wrong-merchant journal | Misstated merchant liability | Bind merchant in the reference and require one matching payable credit |
 | Duplicate invoice payment | Double fulfillment or liability | Atomic open-to-paid transition plus database uniqueness constraints |
@@ -127,6 +131,10 @@ edge.
 - Use test-only keys that cannot control value when deterministic signatures are required.
 - Redact bearer tokens and complete payment requests from telemetry by default.
 - Treat database backups, dead-letter queues, and tracing systems as potential secret stores.
+- Destroy initial and restored bearer-bundle byte arrays as soon as their scoped use ends. Treat this as
+  best effort because immutable strings, runtime copies, and crash memory may survive.
+- Keep active and historical custody keys outside source and ordinary database roles. Key retirement
+  must account for live rows, replicas, WAL, snapshots, and backup retention.
 - Treat a signed Stellar envelope as dispatch-capable data: encrypt it at rest and never include it in
   debug output, telemetry, screenshots, or support artifacts.
 
@@ -200,6 +208,20 @@ The lifecycle stores only sanitized identities, outcomes, timestamps, and state-
 It does not authenticate the outcome source, compute the canonical dispatch bytes, hold or send bearer
 proofs, call a mint, mark an invoice paid, or write a journal. A future adapter must keep secrets,
 signatures, DLEQ values, witnesses, tokens, and raw responses out of lifecycle storage and telemetry.
+
+A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. It binds
+the key ID and an exact reservation fingerprint as associated data, records every 96-bit nonce in an
+append-only key/nonce registry, permits only immutable pre-dispatch custody, and deletes the current
+ciphertext in the transaction that records `consumed` or `released`. It reconstructs plaintext only
+inside a callback whose bundle is destroyed afterward. Restored bundles cannot be resubmitted as newly
+validated input, and spending conditions are rejected before custody.
+
+This does not make application memory, PostgreSQL, or backups non-custodial. Row deletion does not
+physically erase old PostgreSQL page versions, WAL, replicas, snapshots, or backups. JavaScript byte
+wiping cannot erase immutable strings or undiscovered runtime copies. The built-in key-provider port has
+no production KMS or HSM adapter, access audit, per-record envelope key, or cryptographic-erasure
+mechanism. Decryption is also not dispatch authorization: a future coordinator must bind durable effect
+intent before it lets an operator adapter use the proofs.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

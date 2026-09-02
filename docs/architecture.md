@@ -54,6 +54,8 @@ performing network I/O during proof validation. A separate source port and bound
 collect one unit's NUT-01 and NUT-02 data, reject a rotation between two metadata reads, and pass the
 joined result through the same snapshot validator. It owns Cashu wire encoding, endpoint normalization,
 transport-size limits, versioned policy records, and derivation of sanitized NUT-07 proof references.
+The custody-specific validator can additionally return a redacted, explicitly serializable bearer
+bundle after the same strict DLEQ verification. It strips DLEQ data and rejects spending conditions.
 A second source port and bounded HTTPS adapter can query NUT-07 with only those references, enforce an
 exact ordered response, discard witnesses, and return an immutable in-memory state snapshot. It does
 not persist or schedule state observations, change proof reservations, perform operator effects, or
@@ -79,10 +81,13 @@ The adapter pins a current release-candidate cashu-ts version behind this bounda
 The API exposes health, operator-policy evaluation, durable open-invoice plus strict NUT-18 request
 creation and lookup, and a non-accepting payment-envelope endpoint. Its storage adapters also persist
 append-only keyset evidence, local non-bearer proof-reference reservations, payment-scoped NUT-07 state
-evidence, and an append-only reservation lifecycle. The lifecycle binds one canonical dispatch
-fingerprint, preserves ambiguous effects, and requires matching exact proof-state evidence before
-consumption or release. These adapters are not wired into the endpoint. Bearer custody, operator
-dispatch, authentication, proof acceptance, and terminal invoice transitions are not yet implemented.
+evidence, an append-only reservation lifecycle, and reservation-bound encrypted bearer custody. The
+lifecycle binds one canonical dispatch fingerprint, preserves ambiguous effects, and requires matching
+exact proof-state evidence before consumption or release. Terminal lifecycle events delete current
+ciphertext transactionally while an
+append-only nonce-use record remains. These adapters are not wired into the endpoint. Production key
+management, operator dispatch, authentication, proof acceptance, and terminal invoice transitions are
+not yet implemented.
 
 ### Merchant Console
 
@@ -207,8 +212,11 @@ active claim per `(mint URL, Y)` across restarts and concurrent workers. The pro
 binds every complete observation to that exact reservation, preserves terminal `SPENT` history, and
 also requires a caller-supplied freshness interval. The lifecycle repository stores immutable effect
 and transition evidence, keeps ambiguous claims active, and removes claims only for a proven release.
-Repositories reconstruct stored records through validated adapters before return. See the
-[merchant invoice API](invoice-api.md) for request and replay semantics.
+The custody repository stores only authenticated ciphertext and metadata, binds decryption to the exact
+reservation, rejects key/nonce reuse across terminal histories, and exposes plaintext only through a
+self-destroying callback. Its local AES adapter uses a key-provider port; no production KMS or HSM
+adapter exists. Repositories reconstruct stored records through validated adapters before return. See
+the [merchant invoice API](invoice-api.md) for request and replay semantics.
 
 Later migrations must preserve the fixed invoice and recovery contracts and provide atomic
 transitions for:
@@ -253,3 +261,4 @@ justify it.
 - [ADR-0014: Bounded Cashu proof-state observation](adr/0014-observe-cashu-proof-state.md)
 - [ADR-0015: Durable Cashu proof-state evidence](adr/0015-persist-cashu-proof-state-evidence.md)
 - [ADR-0016: Cashu proof-reservation lifecycle](adr/0016-manage-cashu-proof-reservation-lifecycle.md)
+- [ADR-0017: Encrypted Cashu bearer-proof custody](adr/0017-protect-cashu-bearer-proof-custody.md)

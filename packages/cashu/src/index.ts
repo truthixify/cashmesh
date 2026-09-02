@@ -1,4 +1,13 @@
 export {
+  CASHU_BEARER_PROOF_BUNDLE_SCHEMA_VERSION,
+  CashuBearerProofBundleError,
+  type CashuBearerProofBundleErrorCode,
+  CashuBearerProofBundleV1,
+  isCashuBearerProofBundleValidatedForInitialCustodyV1,
+  MAX_CASHU_BEARER_PROOF_BUNDLE_BYTES,
+  restoreCashuBearerProofBundleV1,
+} from "./bearer-proof-bundle";
+export {
   CASHU_KEYSET_OBSERVATION_CONCURRENCY,
   CashuKeysetObservationError,
   type CashuKeysetObservationErrorCode,
@@ -54,7 +63,9 @@ export {
   MAX_NUT18_PAYMENT_PAYLOAD_BYTES,
   MAX_NUT18_PAYMENT_PROOFS,
   type ValidateCashuPaymentProofsInputV1,
+  type ValidatedCashuPaymentForCustodyV1,
   type ValidatedCashuPaymentProofsV1,
+  validateCashuPaymentProofsForCustodyV1,
   validateCashuPaymentProofsV1,
 } from "./payment-payload";
 export {

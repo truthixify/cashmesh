@@ -1,14 +1,15 @@
 # Merchant Invoice API
 
-**Status:** Open-invoice issuance, internal Cashu evidence, and proof-reservation lifecycle implemented;
-payment acceptance not implemented
+**Status:** Open-invoice issuance, internal Cashu evidence, proof-reservation lifecycle, and encrypted
+bearer custody implemented; payment acceptance not implemented
 
 The acquirer API persists version `1` USDC invoices in PostgreSQL and requires a merchant-scoped
 idempotency key for every creation request. It can inspect and bind a NUT-18 payment envelope, but it
 does not yet authenticate merchants, validate proofs in the HTTP path, or transition invoices out of
 `open`. Separate repositories can reserve sanitized proof references after offline validation, persist
-matching NUT-07 state evidence, and manage a conservative reservation lifecycle; none is connected to
-the public endpoint or an operator dispatch adapter.
+matching NUT-07 state evidence, manage a conservative reservation lifecycle, and hold an exact spend
+bundle as reservation-bound authenticated ciphertext; none is connected to the public endpoint or an
+operator dispatch adapter.
 
 ## Create an Invoice
 
@@ -156,9 +157,10 @@ or submitted to an operator.
 
 The Cashu package has a deterministic offline proof validator and bounded NUT-07 observer. Separate
 acquirer repositories can load explicit keyset observations, reserve sanitized proof references,
-persist exact payment-scoped proof-state evidence, and manage lifecycle claims. The HTTP service does
-not orchestrate them and no component retains or dispatches bearer proofs. Those internal capabilities
-are therefore intentionally not enough to change the endpoint response.
+persist exact payment-scoped proof-state evidence, manage lifecycle claims, and encrypt the minimum
+spend bundle for an exact reservation. The HTTP service does not orchestrate them, and no component
+dispatches bearer proofs. Those internal capabilities are therefore intentionally not enough to change
+the endpoint response.
 
 | Status | Meaning |
 |---:|---|
@@ -201,14 +203,19 @@ The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state mi
 - terminal `SPENT` history, including observations inserted out of timestamp order;
 - one immutable operator effect per payment, with exact dispatch and melt-quote identity;
 - append-only reservation transitions with exact replay and conservative ambiguity; and
-- active proof and invoice claims removed only by an evidence-valid release.
+- active proof and invoice claims removed only by an evidence-valid release;
+- one immutable AES-256-GCM ciphertext record per active pre-dispatch reservation, bound to its exact
+  scope and proof references;
+- append-only key/nonce use across terminal histories; and
+- automatic current-ciphertext deletion on `consumed` or `released` lifecycle events.
 
 Keyset, proof-reference, proof-state, and lifecycle persistence are separate repository capabilities.
 Invoice issuance and HTTP payment intake do not automatically observe a mint, select a freshness
 interval, load a stored snapshot, create a reservation, dispatch an effect, or interpret evidence. The
 reservation stores `Y`, keyset ID, and amount; state evidence stores `Y` and the mint-asserted enum;
-lifecycle history stores sanitized effect identities and outcomes. None stores the proof secret,
-signature, DLEQ values, witness, memo, token, or raw payload.
+lifecycle history stores sanitized effect identities and outcomes. Those evidence tables store no proof
+secret, signature, DLEQ value, witness, memo, token, or raw payload. The separate custody table stores
+only ciphertext, authenticated metadata, and key/nonce identity; it has no plaintext bearer columns.
 
 The Cashu request migration refuses an invoice-only database that already contains invoice rows. A
 historical mint allowlist and transport cannot be inferred from an invoice, so deployment requires an
@@ -234,6 +241,11 @@ local fixture request must not be presented as payable.
 
 NUT-07 `Y` values are not spendable without their proof secrets, but they are stable, correlation-sensitive
 identifiers. Exclude them from logs, metrics, traces, support artifacts, and merchant-facing responses.
+
+Bearer-proof ciphertext is still custody. Logical terminal deletion does not guarantee physical erasure
+from PostgreSQL page history, WAL, replicas, snapshots, or backups, and the local key-provider port is
+not a production key-management implementation. Do not wire the scoped decryption callback to a mint
+until durable effect intent and canonical outbound request binding are part of the same coordinator.
 
 Automatic HTTP access logs are disabled because request paths contain merchant and invoice identifiers.
 Do not enable framework request logging without replacing raw URLs with reviewed route templates and

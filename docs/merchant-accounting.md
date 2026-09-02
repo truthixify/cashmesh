@@ -1,13 +1,14 @@
 # Merchant Accounting Contract
 
-**Status:** Domain contract, Cashu-ready open-invoice persistence, and proof-reservation lifecycle
-implemented; payment orchestration not implemented
+**Status:** Domain contract, Cashu-ready open-invoice persistence, proof-reservation lifecycle, and
+encrypted bearer custody implemented; payment orchestration not implemented
 
 This document defines the first CashMesh merchant invoice and journal schemas. Domain behavior remains
 in `packages/domain`. The acquirer now persists open invoice issuance and its strict NUT-18 request
-and can separately persist sanitized proof references after offline validation. It does not orchestrate
-that validation through the HTTP route, retain or dispatch bearer proofs, accept payment, persist a
-paid-invoice journal, settle a merchant, or emit a receipt.
+and can separately persist sanitized proof references after offline validation. It can hold the minimum
+spend bundle as reservation-bound authenticated ciphertext, but does not orchestrate validation through
+the HTTP route, dispatch proofs, accept payment, persist a paid-invoice journal, settle a merchant, or
+emit a receipt.
 
 ## Common Representation
 
@@ -119,11 +120,11 @@ payment, and journal identifiers are a required persistence invariant.
   persistence are not.
 - The invoice API attaches the strict NUT-18 request and inspects its payment envelope but never
   accepts the payment.
-- Stored keyset and proof-state evidence, offline proof validation, proof-reference reservation, and
-  reservation lifecycle exist as separate capabilities but are not payment orchestration.
+- Stored keyset and proof-state evidence, offline proof validation, proof-reference reservation,
+  reservation lifecycle, and encrypted custody exist as separate capabilities but are not payment
+  orchestration.
 - The lifecycle can persist quote identity, outcome evidence, and consumed or released state, but no
-  component obtains live quotes or retains and dispatches the bearer proofs needed for an operator
-  effect.
+  component obtains live quotes or sends the encrypted bearer proofs to an operator.
 - The issued operator-policy snapshot is recorded; merchant-specific cap decisions and suspension
   state are not.
 - No conversion, redemption, payout, refund, reversal, or chargeback entry exists.

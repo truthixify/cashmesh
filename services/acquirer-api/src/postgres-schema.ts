@@ -1429,6 +1429,220 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 6,
   }),
+  Object.freeze({
+    name: "add_encrypted_cashu_proof_custody",
+    sql: `
+      CREATE TABLE cashu_proof_custody_nonce_uses (
+        key_id VARCHAR(128) NOT NULL,
+        nonce BYTEA NOT NULL,
+        payment_id VARCHAR(128) NOT NULL,
+        created_at BIGINT NOT NULL,
+        CONSTRAINT cashu_proof_custody_nonce_uses_pkey PRIMARY KEY (key_id, nonce),
+        CONSTRAINT cashu_proof_custody_nonce_uses_scope_unique UNIQUE (
+          key_id,
+          nonce,
+          payment_id
+        ),
+        CONSTRAINT cashu_proof_custody_nonce_uses_key_id CHECK (
+          key_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_proof_custody_nonce_uses_nonce CHECK (
+          OCTET_LENGTH(nonce) = 12
+        ),
+        CONSTRAINT cashu_proof_custody_nonce_uses_created_at CHECK (
+          created_at >= 0 AND created_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_proof_custody_nonce_uses_reservation_fkey
+          FOREIGN KEY (payment_id)
+          REFERENCES cashu_proof_reservations (payment_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE TABLE cashu_bearer_proof_custody (
+        payment_id VARCHAR(128) PRIMARY KEY,
+        binding_fingerprint CHAR(64) NOT NULL,
+        record_fingerprint CHAR(64) NOT NULL UNIQUE,
+        schema_version SMALLINT NOT NULL,
+        encryption_algorithm TEXT NOT NULL,
+        key_id VARCHAR(128) NOT NULL,
+        nonce BYTEA NOT NULL,
+        authentication_tag BYTEA NOT NULL,
+        ciphertext BYTEA NOT NULL,
+        proof_count SMALLINT NOT NULL,
+        created_at BIGINT NOT NULL,
+        CONSTRAINT cashu_bearer_proof_custody_binding_fingerprint CHECK (
+          binding_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_record_fingerprint CHECK (
+          record_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_bearer_proof_custody_algorithm CHECK (
+          encryption_algorithm = 'aes-256-gcm-v1'
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_key_id CHECK (
+          key_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_nonce CHECK (
+          OCTET_LENGTH(nonce) = 12
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_authentication_tag CHECK (
+          OCTET_LENGTH(authentication_tag) = 16
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_ciphertext CHECK (
+          OCTET_LENGTH(ciphertext) > 0 AND OCTET_LENGTH(ciphertext) <= 65536
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_proof_count CHECK (
+          proof_count > 0 AND proof_count <= 128
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_created_at CHECK (
+          created_at >= 0 AND created_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_bearer_proof_custody_reservation_fkey
+          FOREIGN KEY (payment_id)
+          REFERENCES cashu_proof_reservations (payment_id)
+          ON DELETE RESTRICT,
+        CONSTRAINT cashu_bearer_proof_custody_nonce_use_fkey
+          FOREIGN KEY (key_id, nonce, payment_id)
+          REFERENCES cashu_proof_custody_nonce_uses (key_id, nonce, payment_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE FUNCTION cashmesh_reject_cashu_proof_custody_nonce_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Cashu proof custody nonce history is append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER cashu_proof_custody_nonce_uses_append_only
+        BEFORE UPDATE OR DELETE ON cashu_proof_custody_nonce_uses
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_proof_custody_nonce_mutation();
+
+      CREATE FUNCTION cashmesh_validate_cashu_bearer_proof_custody_insert()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        active_proof_count INTEGER;
+        effect_count INTEGER;
+        invoice_record merchant_invoices%ROWTYPE;
+        latest_state TEXT;
+        reservation_record cashu_proof_reservations%ROWTYPE;
+        reserved_proof_count INTEGER;
+      BEGIN
+        SELECT * INTO reservation_record
+        FROM cashu_proof_reservations
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        IF reservation_record.payment_id IS NULL THEN
+          RAISE EXCEPTION 'Cashu bearer proof custody requires an existing reservation'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        SELECT * INTO invoice_record
+        FROM merchant_invoices
+        WHERE id = reservation_record.invoice_id;
+
+        SELECT state INTO latest_state
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = NEW.payment_id
+        ORDER BY sequence DESC
+        LIMIT 1;
+
+        SELECT COUNT(*) INTO effect_count
+        FROM cashu_operator_effects
+        WHERE payment_id = NEW.payment_id;
+
+        SELECT COUNT(*) INTO reserved_proof_count
+        FROM cashu_reserved_proofs
+        WHERE payment_id = NEW.payment_id;
+
+        SELECT COUNT(*) INTO active_proof_count
+        FROM cashu_active_proof_claims
+        WHERE payment_id = NEW.payment_id;
+
+        IF invoice_record.id IS NULL
+          OR invoice_record.state <> 'open'
+          OR NEW.created_at < reservation_record.reserved_at
+          OR NEW.created_at < invoice_record.created_at
+          OR NEW.created_at >= invoice_record.expires_at
+          OR latest_state IS NOT NULL
+          OR effect_count <> 0
+          OR reserved_proof_count = 0
+          OR NEW.proof_count <> reserved_proof_count
+          OR active_proof_count <> reserved_proof_count
+        THEN
+          RAISE EXCEPTION 'Cashu bearer proof custody requires a pre-dispatch active reservation'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_bearer_proof_custody_validate_insert
+        BEFORE INSERT ON cashu_bearer_proof_custody
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_bearer_proof_custody_insert();
+
+      CREATE FUNCTION cashmesh_guard_cashu_bearer_proof_custody_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        latest_state TEXT;
+      BEGIN
+        IF TG_OP = 'UPDATE' THEN
+          RAISE EXCEPTION 'Cashu bearer proof ciphertext is immutable'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+        END IF;
+
+        SELECT state INTO latest_state
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = OLD.payment_id
+        ORDER BY sequence DESC
+        LIMIT 1;
+
+        IF latest_state IS NULL OR latest_state NOT IN ('consumed', 'released') THEN
+          RAISE EXCEPTION 'Cashu bearer proof ciphertext requires a terminal lifecycle before deletion'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+        END IF;
+
+        RETURN OLD;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_bearer_proof_custody_guard_mutation
+        BEFORE UPDATE OR DELETE ON cashu_bearer_proof_custody
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_guard_cashu_bearer_proof_custody_mutation();
+
+      CREATE FUNCTION cashmesh_destroy_terminal_cashu_bearer_proof_custody()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF NEW.state IN ('consumed', 'released') THEN
+          DELETE FROM cashu_bearer_proof_custody
+          WHERE payment_id = NEW.payment_id;
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_proof_reservation_events_destroy_custody
+        AFTER INSERT ON cashu_proof_reservation_events
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_destroy_terminal_cashu_bearer_proof_custody();
+    `,
+    version: 7,
+  }),
 ]);
 
 export async function applyPostgresMigrations(client: PoolClient): Promise<void> {

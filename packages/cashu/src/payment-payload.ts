@@ -7,7 +7,10 @@ import {
   pointToHex,
   verifyProofsForReceive,
 } from "@cashu/cashu-ts";
-
+import {
+  type CashuBearerProofBundleV1,
+  createCashuBearerProofBundleV1,
+} from "./bearer-proof-bundle";
 import { type CashuKeysetSnapshotV1, createCashuKeysetSnapshotV1 } from "./keyset-snapshot";
 import { normalizeCashuMintUrl } from "./mint-url";
 import { type CashuProofReferenceV1, createCashuProofReferenceV1 } from "./proof-reference";
@@ -45,6 +48,11 @@ export interface ValidatedCashuPaymentProofsV1 extends CashuPaymentPayloadEnvelo
   readonly netAmount: number;
   readonly proofReferences: readonly CashuProofReferenceV1[];
   readonly validatedAt: UnixTimestamp;
+}
+
+export interface ValidatedCashuPaymentForCustodyV1 {
+  readonly bearerProofs: CashuBearerProofBundleV1;
+  readonly validation: ValidatedCashuPaymentProofsV1;
 }
 
 export type CashuPaymentPayloadErrorCode =
@@ -235,6 +243,34 @@ export function validateCashuPaymentProofsV1(
     netAmount: Number(grossAmount - inputFee),
     proofReferences: Object.freeze(proofReferences),
     validatedAt,
+  });
+}
+
+export function validateCashuPaymentProofsForCustodyV1(
+  input: ValidateCashuPaymentProofsInputV1,
+): ValidatedCashuPaymentForCustodyV1 {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new CashuProofValidationError(
+      "invalid_validation_input",
+      "Cashu proof validation input is invalid.",
+    );
+  }
+  const stableInput = Object.freeze({
+    keysetSnapshot: input.keysetSnapshot,
+    rawPayload: input.rawPayload,
+    validatedAt: input.validatedAt,
+  });
+  const validation = validateCashuPaymentProofsV1(stableInput);
+  const { envelope, payload } = decodePaymentPayload(stableInput.rawPayload);
+  return Object.freeze({
+    bearerProofs: createCashuBearerProofBundleV1({
+      invoiceId: envelope.invoiceId,
+      mintUrl: envelope.mintUrl,
+      proofReferences: validation.proofReferences,
+      proofs: payload.proofs,
+      unit: envelope.unit,
+    }),
+    validation,
   });
 }
 
