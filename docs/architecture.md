@@ -62,7 +62,9 @@ not persist or schedule state observations, change proof reservations, or decide
 been paid. A separate bounded NUT-05 client can create and check the custom `stellar` melt quote before
 bearer dispatch. It validates the exact testnet USDC SEP-0007 profile, accepts only current UUIDv7 quote
 identifiers, and binds every check to the original amount, request, fee, method, unit, mint, and expiry.
-It neither persists the quote nor presents proofs to the operator.
+It does not itself persist the quote or present proofs to the operator. A separate acquirer repository
+persists one creation attempt per reserved payment before the POST, retains an ambiguous outcome without
+retry, and appends exact quote observations across restart.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -84,7 +86,8 @@ The adapter pins a current release-candidate cashu-ts version behind this bounda
 The API exposes health, operator-policy evaluation, durable open-invoice plus strict NUT-18 request
 creation and lookup, and a non-accepting payment-envelope endpoint. Its storage adapters also persist
 append-only keyset evidence, local non-bearer proof-reference reservations, payment-scoped NUT-07 state
-evidence, an append-only reservation lifecycle, and reservation-bound encrypted bearer custody. The
+evidence, pre-dispatch Stellar quote attempts and observations, an append-only reservation lifecycle,
+and reservation-bound encrypted bearer custody. The
 lifecycle binds one canonical dispatch fingerprint, preserves ambiguous effects, and requires matching
 exact proof-state evidence before consumption or release. Terminal lifecycle events delete current
 ciphertext transactionally while an
@@ -219,7 +222,10 @@ and transition evidence, keeps ambiguous claims active, and removes claims only 
 The custody repository stores only authenticated ciphertext and metadata, binds decryption to the exact
 reservation, rejects key/nonce reuse across terminal histories, and exposes plaintext only through a
 self-destroying callback. Its local AES adapter uses a key-provider port; no production KMS or HSM
-adapter exists. Repositories reconstruct stored records through validated adapters before return. See
+adapter exists. The quote repository requires that custody and the active reservation before it grants
+one creation authorization, binds one quote identity per mint, retains ambiguous creation, and prevents
+state regression after `PAID`. It is not yet enforced as a prerequisite of lifecycle melt effects.
+Repositories reconstruct stored records through validated adapters before return. See
 the [merchant invoice API](invoice-api.md) for request and replay semantics.
 
 Later migrations must preserve the fixed invoice and recovery contracts and provide atomic
@@ -267,3 +273,4 @@ justify it.
 - [ADR-0016: Cashu proof-reservation lifecycle](adr/0016-manage-cashu-proof-reservation-lifecycle.md)
 - [ADR-0017: Encrypted Cashu bearer-proof custody](adr/0017-protect-cashu-bearer-proof-custody.md)
 - [ADR-0018: Bound Stellar melt quote terms](adr/0018-bound-stellar-melt-quotes.md)
+- [ADR-0019: Durable Stellar melt quote evidence](adr/0019-persist-stellar-melt-quote-evidence.md)

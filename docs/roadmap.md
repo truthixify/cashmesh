@@ -48,7 +48,9 @@ security, legal, liquidity, and partner evidence.
   scoped best-effort zeroization, and terminal ciphertext deletion.
 - Implemented: bounded custom `stellar` NUT-05 quote creation and checking with immutable term binding,
   UUIDv7 identity, and no automatic retry.
-- Remaining: production key management, durable quote persistence, bounded swap/melt execution, and
+- Implemented: durable pre-dispatch quote attempts, single-POST authorization, ambiguity retention,
+  unique mint quote ownership, and append-only terminal state history.
+- Remaining: production key management, quote-to-effect enforcement, bounded swap/melt execution, and
   atomic paid-invoice plus balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.

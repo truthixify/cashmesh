@@ -34,6 +34,8 @@ merchant balances, or move funds.
   permanent key/nonce reuse evidence, and delete current ciphertext at terminal lifecycle state.
 - Create and check strict `stellar` NUT-05 melt quotes through a bounded, non-retrying HTTPS client
   while binding every later observation to the original terms.
+- Persist one pre-dispatch Stellar quote attempt per payment, retain ambiguous creation without retry,
+  and append immutable quote-state observations across restart.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -69,7 +71,7 @@ frameworks adapt to it at the edges.
 | Path | Responsibility |
 |---|---|
 | `apps/merchant-console/` | Next.js merchant operations reference client |
-| `services/acquirer-api/` | Fastify policy, durable invoice API, Cashu evidence, encrypted proof custody, and reservation lifecycle |
+| `services/acquirer-api/` | Fastify policy, durable invoice API, Cashu evidence, encrypted proof custody, quote ownership, and reservation lifecycle |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
 | `packages/cashu/` | NUT-18, bounded keyset/proof/quote clients, proof integrity and fees, redacted bearer bundles, and interoperability fixtures |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |

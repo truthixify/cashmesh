@@ -1643,6 +1643,455 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 7,
   }),
+  Object.freeze({
+    name: "persist_stellar_melt_quote_attempts",
+    sql: `
+      CREATE TABLE cashu_stellar_melt_quote_attempts (
+        attempt_id VARCHAR(128) PRIMARY KEY,
+        attempt_fingerprint CHAR(64) NOT NULL UNIQUE,
+        payment_id VARCHAR(128) NOT NULL UNIQUE,
+        invoice_id VARCHAR(128) NOT NULL,
+        operator_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        method TEXT NOT NULL,
+        unit VARCHAR(32) NOT NULL,
+        amount BIGINT NOT NULL,
+        request VARCHAR(4096) NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        started_at BIGINT NOT NULL,
+        CONSTRAINT cashu_stellar_quote_attempts_scope_unique UNIQUE (
+          attempt_id,
+          payment_id,
+          mint_url
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_id CHECK (
+          attempt_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_fingerprint CHECK (
+          attempt_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_payment_id CHECK (
+          payment_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_invoice_id CHECK (
+          invoice_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_operator_id CHECK (
+          operator_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_mint_url CHECK (
+          mint_url ~ '^https://[^[:space:]]+$'
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_method CHECK (method = 'stellar'),
+        CONSTRAINT cashu_stellar_quote_attempts_unit CHECK (unit = 'usdc'),
+        CONSTRAINT cashu_stellar_quote_attempts_amount CHECK (
+          amount >= 1 AND amount <= 25000
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_request CHECK (
+          LENGTH(request) >= 1 AND LENGTH(request) <= 4096
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_stellar_quote_attempts_started_at CHECK (
+          started_at >= 0 AND started_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_stellar_quote_attempts_reservation_fkey
+          FOREIGN KEY (payment_id, invoice_id, operator_id, mint_url)
+          REFERENCES cashu_proof_reservations (
+            payment_id,
+            invoice_id,
+            operator_id,
+            mint_url
+          )
+          ON DELETE RESTRICT
+      );
+
+      CREATE INDEX cashu_stellar_quote_attempts_invoice_idx
+        ON cashu_stellar_melt_quote_attempts (invoice_id, started_at, attempt_id);
+
+      CREATE TABLE cashu_stellar_melt_quote_outcomes (
+        attempt_id VARCHAR(128) PRIMARY KEY,
+        outcome_fingerprint CHAR(64) NOT NULL UNIQUE,
+        payment_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        outcome_kind TEXT NOT NULL,
+        ambiguity_reason TEXT,
+        quote_id VARCHAR(36),
+        fee_reserve BIGINT,
+        expiry BIGINT,
+        schema_version SMALLINT NOT NULL,
+        recorded_at BIGINT NOT NULL,
+        CONSTRAINT cashu_stellar_quote_outcomes_scope_unique UNIQUE (
+          attempt_id,
+          payment_id,
+          mint_url,
+          quote_id
+        ),
+        CONSTRAINT cashu_stellar_quote_outcomes_fingerprint CHECK (
+          outcome_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_outcomes_kind CHECK (
+          outcome_kind IN ('ambiguous', 'quoted')
+        ),
+        CONSTRAINT cashu_stellar_quote_outcomes_quote_id CHECK (
+          quote_id IS NULL
+          OR quote_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_outcomes_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_stellar_quote_outcomes_recorded_at CHECK (
+          recorded_at >= 0 AND recorded_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_stellar_quote_outcomes_shape CHECK (
+          (
+            outcome_kind = 'ambiguous'
+            AND ambiguity_reason = 'transport_ambiguous'
+            AND quote_id IS NULL
+            AND fee_reserve IS NULL
+            AND expiry IS NULL
+          )
+          OR (
+            outcome_kind = 'quoted'
+            AND ambiguity_reason IS NULL
+            AND quote_id IS NOT NULL
+            AND fee_reserve >= 0
+            AND fee_reserve <= 9007199254740991
+            AND expiry > recorded_at
+            AND expiry <= 9007199254740991
+          )
+        ),
+        CONSTRAINT cashu_stellar_quote_outcomes_attempt_fkey
+          FOREIGN KEY (attempt_id, payment_id, mint_url)
+          REFERENCES cashu_stellar_melt_quote_attempts (attempt_id, payment_id, mint_url)
+          ON DELETE RESTRICT
+      );
+
+      CREATE UNIQUE INDEX cashu_stellar_quote_outcomes_mint_quote_unique
+        ON cashu_stellar_melt_quote_outcomes (mint_url, quote_id)
+        WHERE outcome_kind = 'quoted';
+
+      CREATE TABLE cashu_stellar_melt_quote_observations (
+        snapshot_fingerprint CHAR(64) PRIMARY KEY,
+        attempt_id VARCHAR(128) NOT NULL,
+        payment_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        quote_id VARCHAR(36) NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        observed_at BIGINT NOT NULL,
+        state TEXT NOT NULL,
+        CONSTRAINT cashu_stellar_quote_observations_attempt_time_unique UNIQUE (
+          attempt_id,
+          observed_at
+        ),
+        CONSTRAINT cashu_stellar_quote_observations_fingerprint CHECK (
+          snapshot_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_observations_quote_id CHECK (
+          quote_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        ),
+        CONSTRAINT cashu_stellar_quote_observations_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_stellar_quote_observations_observed_at CHECK (
+          observed_at >= 0 AND observed_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_stellar_quote_observations_state CHECK (
+          state IN ('UNPAID', 'PENDING', 'PAID')
+        ),
+        CONSTRAINT cashu_stellar_quote_observations_outcome_fkey
+          FOREIGN KEY (attempt_id, payment_id, mint_url, quote_id)
+          REFERENCES cashu_stellar_melt_quote_outcomes (
+            attempt_id,
+            payment_id,
+            mint_url,
+            quote_id
+          )
+          ON DELETE RESTRICT
+      );
+
+      CREATE INDEX cashu_stellar_quote_observations_latest_idx
+        ON cashu_stellar_melt_quote_observations (
+          attempt_id,
+          observed_at DESC,
+          snapshot_fingerprint
+        );
+
+      CREATE FUNCTION cashmesh_reject_stellar_quote_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Cashu Stellar melt quote evidence is append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_quote_attempts_append_only
+        BEFORE UPDATE OR DELETE ON cashu_stellar_melt_quote_attempts
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_stellar_quote_mutation();
+
+      CREATE TRIGGER cashu_stellar_quote_outcomes_append_only
+        BEFORE UPDATE OR DELETE ON cashu_stellar_melt_quote_outcomes
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_stellar_quote_mutation();
+
+      CREATE TRIGGER cashu_stellar_quote_observations_append_only
+        BEFORE UPDATE OR DELETE ON cashu_stellar_melt_quote_observations
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_stellar_quote_mutation();
+
+      CREATE FUNCTION cashmesh_validate_stellar_quote_attempt()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        active_proof_count INTEGER;
+        custody_created_at BIGINT;
+        effect_count INTEGER;
+        event_count INTEGER;
+        invoice_record merchant_invoices%ROWTYPE;
+        reservation_record cashu_proof_reservations%ROWTYPE;
+        reserved_proof_count INTEGER;
+      BEGIN
+        SELECT * INTO reservation_record
+        FROM cashu_proof_reservations
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        SELECT * INTO invoice_record
+        FROM merchant_invoices
+        WHERE id = NEW.invoice_id;
+
+        SELECT created_at INTO custody_created_at
+        FROM cashu_bearer_proof_custody
+        WHERE payment_id = NEW.payment_id;
+
+        SELECT COUNT(*) INTO effect_count
+        FROM cashu_operator_effects
+        WHERE payment_id = NEW.payment_id;
+
+        SELECT COUNT(*) INTO event_count
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = NEW.payment_id;
+
+        SELECT COUNT(*) INTO reserved_proof_count
+        FROM cashu_reserved_proofs
+        WHERE payment_id = NEW.payment_id;
+
+        SELECT COUNT(*) INTO active_proof_count
+        FROM cashu_active_proof_claims
+        WHERE payment_id = NEW.payment_id;
+
+        IF reservation_record.payment_id IS NULL
+          OR invoice_record.id IS NULL
+          OR reservation_record.invoice_id <> NEW.invoice_id
+          OR reservation_record.operator_id <> NEW.operator_id
+          OR reservation_record.mint_url <> NEW.mint_url
+          OR reservation_record.unit <> NEW.unit
+          OR invoice_record.unit <> NEW.unit
+          OR invoice_record.amount <> NEW.amount
+          OR invoice_record.state <> 'open'
+          OR NEW.started_at < reservation_record.reserved_at
+          OR NEW.started_at < invoice_record.created_at
+          OR NEW.started_at >= invoice_record.expires_at
+          OR custody_created_at IS NULL
+          OR NEW.started_at < custody_created_at
+          OR effect_count <> 0
+          OR event_count <> 0
+          OR reserved_proof_count = 0
+          OR active_proof_count <> reserved_proof_count
+        THEN
+          RAISE EXCEPTION 'Cashu Stellar quote attempt requires an active custodial reservation'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_quote_attempts_validate
+        BEFORE INSERT ON cashu_stellar_melt_quote_attempts
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_stellar_quote_attempt();
+
+      CREATE FUNCTION cashmesh_validate_stellar_quote_outcome()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        attempt_record cashu_stellar_melt_quote_attempts%ROWTYPE;
+        effect_count INTEGER;
+        event_count INTEGER;
+      BEGIN
+        PERFORM payment_id
+        FROM cashu_proof_reservations
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        SELECT * INTO attempt_record
+        FROM cashu_stellar_melt_quote_attempts
+        WHERE attempt_id = NEW.attempt_id
+        FOR UPDATE;
+
+        SELECT COUNT(*) INTO effect_count
+        FROM cashu_operator_effects
+        WHERE payment_id = NEW.payment_id;
+
+        SELECT COUNT(*) INTO event_count
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = NEW.payment_id;
+
+        IF attempt_record.attempt_id IS NULL
+          OR NEW.recorded_at < attempt_record.started_at
+          OR effect_count <> 0
+          OR event_count <> 0
+          OR NOT EXISTS (
+            SELECT 1
+            FROM cashu_bearer_proof_custody
+            WHERE payment_id = NEW.payment_id
+          )
+          OR (
+            NEW.outcome_kind = 'quoted'
+            AND (
+              NEW.expiry > attempt_record.started_at + 900
+              OR NEW.fee_reserve > 9007199254740991 - attempt_record.amount
+            )
+          )
+        THEN
+          RAISE EXCEPTION 'Cashu Stellar quote outcome violates its pre-dispatch attempt'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_quote_outcomes_validate
+        BEFORE INSERT ON cashu_stellar_melt_quote_outcomes
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_stellar_quote_outcome();
+
+      CREATE FUNCTION cashmesh_validate_stellar_quote_observation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        latest_observation cashu_stellar_melt_quote_observations%ROWTYPE;
+        outcome_record cashu_stellar_melt_quote_outcomes%ROWTYPE;
+      BEGIN
+        SELECT * INTO outcome_record
+        FROM cashu_stellar_melt_quote_outcomes
+        WHERE attempt_id = NEW.attempt_id
+        FOR UPDATE;
+
+        SELECT * INTO latest_observation
+        FROM cashu_stellar_melt_quote_observations
+        WHERE attempt_id = NEW.attempt_id
+        ORDER BY observed_at DESC
+        LIMIT 1;
+
+        IF outcome_record.attempt_id IS NULL
+          OR outcome_record.outcome_kind <> 'quoted'
+          OR outcome_record.payment_id <> NEW.payment_id
+          OR outcome_record.mint_url <> NEW.mint_url
+          OR outcome_record.quote_id <> NEW.quote_id
+          OR NEW.observed_at < outcome_record.recorded_at
+          OR (
+            latest_observation.attempt_id IS NULL
+            AND (
+              NEW.observed_at <> outcome_record.recorded_at
+              OR NEW.state <> 'UNPAID'
+            )
+          )
+          OR (
+            latest_observation.attempt_id IS NOT NULL
+            AND (
+              NEW.observed_at <= latest_observation.observed_at
+              OR (
+                latest_observation.state = 'PAID'
+                AND NEW.state <> 'PAID'
+              )
+            )
+          )
+        THEN
+          RAISE EXCEPTION 'Cashu Stellar quote observation transition is invalid'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_quote_observations_validate
+        BEFORE INSERT ON cashu_stellar_melt_quote_observations
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_stellar_quote_observation();
+
+      CREATE FUNCTION cashmesh_require_stellar_quote_observation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        first_observation cashu_stellar_melt_quote_observations%ROWTYPE;
+        observation_count INTEGER;
+        outcome_record cashu_stellar_melt_quote_outcomes%ROWTYPE;
+        requested_attempt_id VARCHAR(128);
+      BEGIN
+        requested_attempt_id := CASE
+          WHEN TG_OP = 'DELETE' THEN OLD.attempt_id
+          ELSE NEW.attempt_id
+        END;
+
+        SELECT * INTO outcome_record
+        FROM cashu_stellar_melt_quote_outcomes
+        WHERE attempt_id = requested_attempt_id;
+
+        IF outcome_record.attempt_id IS NULL THEN
+          RETURN NULL;
+        END IF;
+
+        SELECT COUNT(*) INTO observation_count
+        FROM cashu_stellar_melt_quote_observations
+        WHERE attempt_id = requested_attempt_id;
+
+        SELECT * INTO first_observation
+        FROM cashu_stellar_melt_quote_observations
+        WHERE attempt_id = requested_attempt_id
+        ORDER BY observed_at
+        LIMIT 1;
+
+        IF (
+          outcome_record.outcome_kind = 'ambiguous'
+          AND observation_count <> 0
+        )
+        OR (
+          outcome_record.outcome_kind = 'quoted'
+          AND (
+            observation_count = 0
+            OR first_observation.observed_at <> outcome_record.recorded_at
+            OR first_observation.state <> 'UNPAID'
+          )
+        )
+        THEN
+          RAISE EXCEPTION 'Cashu Stellar quote outcome lacks its exact initial observation'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER cashu_stellar_quote_outcomes_observation_required
+        AFTER INSERT OR UPDATE OR DELETE ON cashu_stellar_melt_quote_outcomes
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_stellar_quote_observation();
+
+      CREATE CONSTRAINT TRIGGER cashu_stellar_quote_observations_complete
+        AFTER INSERT OR UPDATE OR DELETE ON cashu_stellar_melt_quote_observations
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_stellar_quote_observation();
+    `,
+    version: 8,
+  }),
 ]);
 
 export async function applyPostgresMigrations(client: PoolClient): Promise<void> {

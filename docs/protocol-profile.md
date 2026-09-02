@@ -168,9 +168,20 @@ One shared deterministic response fixture is accepted by the TypeScript client a
 CDK `MeltQuoteCustomResponse` types.
 
 This quote state is not settlement evidence. The client does not store the quote, decrypt proofs,
-execute a melt, interpret `PAID` as proof consumption, release a reservation, or write accounting. A
-future coordinator must persist one quote and exact dispatch intent before accessing bearer custody,
-then combine the operator outcome with the existing exact NUT-07 evidence rules.
+execute a melt, interpret `PAID` as proof consumption, release a reservation, or write accounting.
+
+The acquirer repository separately persists one creation attempt before the POST. It derives invoice,
+operator, and mint ownership from an active reserved payment, requires existing encrypted custody, and
+requires the SEP-0007 amount to equal the invoice amount. Only a new `begin` result authorizes the one
+POST; exact replay returns recovery state without authorizing another call. The attempt then accepts one
+immutable transport-ambiguous or quoted outcome. An ambiguous outcome cannot be replaced automatically.
+
+The quoted outcome owns one UUIDv7 per mint and starts with the validated `UNPAID` snapshot. Later
+observations append in completion-time order, bind every immutable term, permit `PENDING` to return to
+`UNPAID`, and prohibit regression after `PAID`. PostgreSQL repeats the active-reservation, custody,
+expiry, uniqueness, ordering, and append-only constraints, while repository reads reconstruct and
+fingerprint the complete history. The repository does not call the client or enforce that a later melt
+effect uses this quote; that coordinator and database binding remain required before bearer access.
 
 ## Durable Journal Scope
 

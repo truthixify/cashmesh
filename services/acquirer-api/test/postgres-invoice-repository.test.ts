@@ -64,6 +64,9 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
       await pool.query(
         `
           TRUNCATE
+            cashu_stellar_melt_quote_observations,
+            cashu_stellar_melt_quote_outcomes,
+            cashu_stellar_melt_quote_attempts,
             cashu_bearer_proof_custody,
             cashu_proof_custody_nonce_uses,
             cashu_proof_reservation_events,

@@ -208,6 +208,26 @@ even when evidence is backfilled out of order. PostgreSQL repeats exact proof-se
 history constraints below the repository. The store remains append-only, unscheduled, non-accepting,
 and witness-free; it does not interpret a snapshot as payment by itself.
 
+## Stellar Melt Quote Evidence
+
+The acquirer can persist one custom `stellar` melt quote attempt for an already reserved payment. The
+attempt derives the invoice, operator, mint, and `usdc` unit from the reservation, requires encrypted
+bearer custody and no started effect, and requires the exact SEP-0007 cent amount to equal the open
+invoice. Its first successful insert is the only creation authorization. Exact concurrent or restarted
+calls replay current state and must not issue another POST.
+
+One immutable outcome records either `transport_ambiguous` with no quote identity or the complete
+initial `UNPAID` quote. Ambiguity cannot be overwritten by a later quote or used as automatic retry
+permission. A quoted outcome binds one UUIDv7 at a mint, its fee reserve and expiry, and the original
+request. Later `UNPAID`, `PENDING`, or `PAID` observations are append-only and chronological; changed
+terms, timestamp equivocation, and regression after `PAID` fail.
+
+The full Stellar request, destination, optional memo, quote ID, mint, amount, and timing are durable
+correlation metadata and must not enter telemetry or merchant-facing responses. This repository does
+not contact a mint, inspect custody plaintext, dispatch proofs, enforce fee caps, change reservation
+state, or establish merchant payment. The separately implemented lifecycle does not yet require its
+melt effect to reference this stored quote.
+
 ## Proof-Reservation Lifecycle
 
 The acquirer can persist one exact operator effect intent for a reserved payment. A swap or melt effect

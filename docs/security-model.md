@@ -61,6 +61,8 @@ of Cashu or Stellar implementations.
 - Post-dispatch release requires a matching terminal failure and a later exact all-`UNSPENT` snapshot.
 - A checked melt quote may change state but never its mint, method, unit, request, amount, fee, identity,
   or expiry; an observed `PAID` quote never regresses locally.
+- One persisted creation attempt owns a payment; only its first insert authorizes the single POST, and
+  transport ambiguity cannot become automatic retry permission.
 - A melt cannot be released as unpaid before its bound quote expires.
 - A melt quote state never substitutes for exact reserved-proof state or matching effect evidence.
 - Consumption requires matching success and a later exact all-`SPENT` snapshot.
@@ -79,7 +81,7 @@ of Cashu or Stellar implementations.
 | One outbound operation bound to multiple payments | Conflicting recovery and double fulfillment | Unique mint, effect-kind, and dispatch-fingerprint binding |
 | Melt released while its quote remains payable | Double redemption | Bound quote expiry plus post-expiry `UNPAID` and later all-`UNSPENT` evidence |
 | Rebound or malformed Stellar melt quote | Wrong payout terms or unsafe recovery | Strict SEP-0007 request validation, UUIDv7 identity, immutable-term checks, and terminal `PAID` state |
-| Duplicate quote creation after timeout | Correlation and abandoned remote state | No automatic POST retry; future persistence must bind one creation attempt before retry policy |
+| Duplicate quote creation after timeout | Correlation and abandoned remote state | Persist one attempt before POST; exact replay never reauthorizes creation and ambiguity is terminal for automation |
 | Unhandled NUT-08 change | Lost recoverable value | Reject nonempty change until matching blinded-output data is durably recoverable |
 | Dishonest or insolvent operator | Merchant loss | Per-operator tiers, caps, conversion policy, suspension, diversification |
 | Forged merchant callback | Fulfillment without payment | Signed/replay-protected webhooks and merchant-side verification |
@@ -223,8 +225,15 @@ SEP-0007 fields, and Stellar destination checksum before the POST. It accepts on
 common fields, UUIDv7 identity, and an expiry inside the 900-second profile, then requires every check
 to match the original request, amount, fee, method, unit, mint, and expiry. It performs no automatic
 retry, discards undeclared fields and payment preimages, and rejects nonempty NUT-08 change. The quote
-and request are not yet persisted, and the client has no bearer-custody access, protected-mint
-authentication, execution method, lifecycle write, or accounting authority.
+client has no bearer-custody access, protected-mint authentication, execution method, lifecycle write,
+or accounting authority.
+
+A separate PostgreSQL repository persists one exact attempt against an open invoice, active proof
+reservation, encrypted custody record, issued operator, and mint before creation. Only the first insert
+authorizes one POST; replay is recovery-only. One immutable outcome records either transport ambiguity
+or the initial `UNPAID` quote, and append-only observations preserve exact terms and terminal `PAID`
+history. Full requests, destinations, quote IDs, and timing remain correlation-sensitive. This boundary
+does not yet force the separately implemented melt effect to reference the stored quote.
 
 A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. It binds
 the key ID and an exact reservation fingerprint as associated data, records every 96-bit nonce in an

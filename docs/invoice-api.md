@@ -207,15 +207,20 @@ The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state mi
 - one immutable AES-256-GCM ciphertext record per active pre-dispatch reservation, bound to its exact
   scope and proof references;
 - append-only key/nonce use across terminal histories; and
-- automatic current-ciphertext deletion on `consumed` or `released` lifecycle events.
+- automatic current-ciphertext deletion on `consumed` or `released` lifecycle events;
+- one immutable Stellar melt quote attempt per payment, requiring its open invoice, active reservation,
+  and encrypted custody before the single authorized creation call; and
+- one immutable quote outcome plus append-only, term-bound observations with terminal `PAID` history.
 
-Keyset, proof-reference, proof-state, and lifecycle persistence are separate repository capabilities.
+Keyset, proof-reference, proof-state, quote, and lifecycle persistence are separate repository capabilities.
 Invoice issuance and HTTP payment intake do not automatically observe a mint, select a freshness
 interval, load a stored snapshot, create a reservation, dispatch an effect, or interpret evidence. The
 reservation stores `Y`, keyset ID, and amount; state evidence stores `Y` and the mint-asserted enum;
 lifecycle history stores sanitized effect identities and outcomes. Those evidence tables store no proof
 secret, signature, DLEQ value, witness, memo, token, or raw payload. The separate custody table stores
 only ciphertext, authenticated metadata, and key/nonce identity; it has no plaintext bearer columns.
+Quote evidence stores the full SEP-0007 payout request and quote identity, so it is sensitive even
+though it contains no bearer proof. The payment endpoint does not create or observe quote attempts.
 
 The Cashu request migration refuses an invoice-only database that already contains invoice rows. A
 historical mint allowlist and transport cannot be inferred from an invoice, so deployment requires an
