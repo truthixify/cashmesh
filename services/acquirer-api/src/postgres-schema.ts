@@ -3007,6 +3007,383 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 12,
   }),
+  Object.freeze({
+    name: "schedule_stellar_melt_recovery",
+    sql: `
+      LOCK TABLE
+        cashu_proof_reservations,
+        cashu_operator_effects,
+        cashu_proof_reservation_events
+        IN ACCESS EXCLUSIVE MODE;
+
+      CREATE TABLE cashu_stellar_melt_recovery_jobs (
+        payment_id VARCHAR(128) PRIMARY KEY,
+        effect_id VARCHAR(128) NOT NULL UNIQUE,
+        schema_version SMALLINT NOT NULL,
+        initial_attempt_at BIGINT NOT NULL,
+        CONSTRAINT cashu_stellar_melt_recovery_jobs_payment_id CHECK (
+          payment_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_jobs_effect_id CHECK (
+          effect_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_jobs_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_stellar_melt_recovery_jobs_initial_attempt_at CHECK (
+          initial_attempt_at >= 0 AND initial_attempt_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_jobs_effect_fkey
+          FOREIGN KEY (effect_id, payment_id)
+          REFERENCES cashu_operator_effects (effect_id, payment_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE TABLE cashu_stellar_melt_recovery_leases (
+        lease_token VARCHAR(128) PRIMARY KEY,
+        payment_id VARCHAR(128) NOT NULL,
+        attempt_number SMALLINT NOT NULL,
+        worker_id VARCHAR(128) NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        claimed_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
+        CONSTRAINT cashu_stellar_melt_recovery_leases_scope_unique UNIQUE (
+          lease_token,
+          payment_id
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_leases_attempt_unique UNIQUE (
+          payment_id,
+          attempt_number
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_leases_token CHECK (
+          lease_token ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_leases_worker CHECK (
+          worker_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_leases_attempt CHECK (
+          attempt_number > 0 AND attempt_number <= 1024
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_leases_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_stellar_melt_recovery_leases_claimed_at CHECK (
+          claimed_at >= 0 AND claimed_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_leases_expires_at CHECK (
+          expires_at > claimed_at
+          AND expires_at <= 9007199254740991
+          AND expires_at - claimed_at <= 300
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_leases_job_fkey
+          FOREIGN KEY (payment_id)
+          REFERENCES cashu_stellar_melt_recovery_jobs (payment_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE INDEX cashu_stellar_melt_recovery_leases_latest_idx
+        ON cashu_stellar_melt_recovery_leases (payment_id, attempt_number DESC);
+
+      CREATE TABLE cashu_stellar_melt_recovery_outcomes (
+        lease_token VARCHAR(128) PRIMARY KEY,
+        payment_id VARCHAR(128) NOT NULL,
+        outcome_kind TEXT NOT NULL,
+        reason TEXT,
+        recorded_at BIGINT NOT NULL,
+        next_attempt_at BIGINT,
+        CONSTRAINT cashu_stellar_melt_recovery_outcomes_kind CHECK (
+          outcome_kind IN ('accepted', 'released', 'retry_scheduled', 'attention_required')
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_outcomes_recorded_at CHECK (
+          recorded_at >= 0 AND recorded_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_outcomes_next_attempt_at CHECK (
+          next_attempt_at IS NULL
+          OR (next_attempt_at > recorded_at AND next_attempt_at <= 9007199254740991)
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_outcomes_shape CHECK (
+          (
+            outcome_kind IN ('accepted', 'released')
+            AND reason IS NULL
+            AND next_attempt_at IS NULL
+          )
+          OR (
+            outcome_kind = 'retry_scheduled'
+            AND reason IN (
+              'nonterminal_evidence',
+              'operator_state_unknown',
+              'storage_unavailable',
+              'worker_aborted'
+            )
+            AND next_attempt_at IS NOT NULL
+          )
+          OR (
+            outcome_kind = 'attention_required'
+            AND reason IN (
+              'evidence_invalid',
+              'operator_response_invalid',
+              'recovery_configuration_invalid',
+              'retry_exhausted'
+            )
+            AND next_attempt_at IS NULL
+          )
+        ),
+        CONSTRAINT cashu_stellar_melt_recovery_outcomes_lease_fkey
+          FOREIGN KEY (lease_token, payment_id)
+          REFERENCES cashu_stellar_melt_recovery_leases (lease_token, payment_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE FUNCTION cashmesh_validate_stellar_melt_recovery_job()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        effect_record cashu_operator_effects%ROWTYPE;
+      BEGIN
+        SELECT * INTO effect_record
+        FROM cashu_operator_effects
+        WHERE effect_id = NEW.effect_id
+          AND payment_id = NEW.payment_id;
+
+        IF NOT FOUND
+          OR effect_record.effect_kind <> 'melt'
+          OR NEW.initial_attempt_at <> LEAST(
+            9007199254740991::BIGINT,
+            effect_record.started_at + 60
+          )
+        THEN
+          RAISE EXCEPTION 'Cashu Stellar melt recovery job does not match its effect'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_melt_recovery_jobs_valid
+        BEFORE INSERT ON cashu_stellar_melt_recovery_jobs
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_stellar_melt_recovery_job();
+
+      INSERT INTO cashu_stellar_melt_recovery_jobs (
+        payment_id,
+        effect_id,
+        schema_version,
+        initial_attempt_at
+      )
+      SELECT
+        effect.payment_id,
+        effect.effect_id,
+        1,
+        LEAST(9007199254740991::BIGINT, effect.started_at + 60)
+      FROM cashu_operator_effects AS effect
+      WHERE effect.effect_kind = 'melt';
+
+      CREATE FUNCTION cashmesh_schedule_stellar_melt_recovery()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF NEW.effect_kind = 'melt' THEN
+          INSERT INTO cashu_stellar_melt_recovery_jobs (
+            payment_id,
+            effect_id,
+            schema_version,
+            initial_attempt_at
+          )
+          VALUES (
+            NEW.payment_id,
+            NEW.effect_id,
+            1,
+            LEAST(9007199254740991::BIGINT, NEW.started_at + 60)
+          );
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_operator_effects_schedule_stellar_melt_recovery
+        AFTER INSERT ON cashu_operator_effects
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_schedule_stellar_melt_recovery();
+
+      CREATE FUNCTION cashmesh_lock_stellar_melt_recovery_for_lifecycle_event()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        PERFORM payment_id
+        FROM cashu_proof_reservations
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        PERFORM payment_id
+        FROM cashu_stellar_melt_recovery_jobs
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_proof_reservation_events_lock_stellar_melt_recovery
+        BEFORE INSERT ON cashu_proof_reservation_events
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_lock_stellar_melt_recovery_for_lifecycle_event();
+
+      CREATE FUNCTION cashmesh_validate_stellar_melt_recovery_lease()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        eligible_at BIGINT;
+        job_record cashu_stellar_melt_recovery_jobs%ROWTYPE;
+        latest_lease cashu_stellar_melt_recovery_leases%ROWTYPE;
+        latest_outcome cashu_stellar_melt_recovery_outcomes%ROWTYPE;
+        lifecycle_state TEXT;
+      BEGIN
+        SELECT * INTO job_record
+        FROM cashu_stellar_melt_recovery_jobs
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        SELECT state INTO lifecycle_state
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = NEW.payment_id
+        ORDER BY sequence DESC
+        LIMIT 1;
+
+        IF job_record.payment_id IS NULL
+          OR lifecycle_state IS NULL
+          OR lifecycle_state IN ('consumed', 'released')
+        THEN
+          RAISE EXCEPTION 'Cashu Stellar melt recovery job is not active'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+        END IF;
+
+        SELECT * INTO latest_lease
+        FROM cashu_stellar_melt_recovery_leases
+        WHERE payment_id = NEW.payment_id
+        ORDER BY attempt_number DESC
+        LIMIT 1;
+
+        IF latest_lease.lease_token IS NULL THEN
+          eligible_at := job_record.initial_attempt_at;
+          IF NEW.attempt_number <> 1 THEN
+            RAISE EXCEPTION 'Cashu Stellar melt recovery lease sequence is invalid'
+              USING ERRCODE = 'check_violation';
+          END IF;
+        ELSE
+          IF NEW.attempt_number <> latest_lease.attempt_number + 1 THEN
+            RAISE EXCEPTION 'Cashu Stellar melt recovery lease sequence is invalid'
+              USING ERRCODE = 'check_violation';
+          END IF;
+
+          SELECT * INTO latest_outcome
+          FROM cashu_stellar_melt_recovery_outcomes
+          WHERE lease_token = latest_lease.lease_token;
+
+          IF latest_outcome.lease_token IS NULL THEN
+            eligible_at := latest_lease.expires_at;
+          ELSIF latest_outcome.outcome_kind = 'retry_scheduled' THEN
+            eligible_at := latest_outcome.next_attempt_at;
+          ELSE
+            RAISE EXCEPTION 'Cashu Stellar melt recovery job is not retryable'
+              USING ERRCODE = 'object_not_in_prerequisite_state';
+          END IF;
+        END IF;
+
+        IF eligible_at IS NULL OR NEW.claimed_at < eligible_at THEN
+          RAISE EXCEPTION 'Cashu Stellar melt recovery lease is not yet eligible'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_melt_recovery_leases_valid
+        BEFORE INSERT ON cashu_stellar_melt_recovery_leases
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_stellar_melt_recovery_lease();
+
+      CREATE FUNCTION cashmesh_validate_stellar_melt_recovery_outcome()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        latest_lease cashu_stellar_melt_recovery_leases%ROWTYPE;
+        lifecycle_state TEXT;
+      BEGIN
+        PERFORM payment_id
+        FROM cashu_stellar_melt_recovery_jobs
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        SELECT * INTO latest_lease
+        FROM cashu_stellar_melt_recovery_leases
+        WHERE payment_id = NEW.payment_id
+        ORDER BY attempt_number DESC
+        LIMIT 1;
+
+        SELECT state INTO lifecycle_state
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = NEW.payment_id
+        ORDER BY sequence DESC
+        LIMIT 1;
+
+        IF latest_lease.lease_token IS DISTINCT FROM NEW.lease_token
+          OR NEW.recorded_at < latest_lease.claimed_at
+          OR NEW.recorded_at > latest_lease.expires_at
+          OR (
+            NEW.outcome_kind = 'accepted'
+            AND lifecycle_state IS DISTINCT FROM 'consumed'
+          )
+          OR (
+            NEW.outcome_kind = 'released'
+            AND lifecycle_state IS DISTINCT FROM 'released'
+          )
+          OR (
+            NEW.outcome_kind IN ('retry_scheduled', 'attention_required')
+            AND (
+              lifecycle_state IS NULL
+              OR lifecycle_state NOT IN ('dispatch_started', 'pending', 'needs_attention')
+            )
+          )
+        THEN
+          RAISE EXCEPTION 'Cashu Stellar melt recovery lease is no longer current'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_melt_recovery_outcomes_valid
+        BEFORE INSERT ON cashu_stellar_melt_recovery_outcomes
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_stellar_melt_recovery_outcome();
+
+      CREATE FUNCTION cashmesh_reject_stellar_melt_recovery_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Cashu Stellar melt recovery scheduling history is append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_melt_recovery_jobs_append_only
+        BEFORE UPDATE OR DELETE ON cashu_stellar_melt_recovery_jobs
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_stellar_melt_recovery_mutation();
+
+      CREATE TRIGGER cashu_stellar_melt_recovery_leases_append_only
+        BEFORE UPDATE OR DELETE ON cashu_stellar_melt_recovery_leases
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_stellar_melt_recovery_mutation();
+
+      CREATE TRIGGER cashu_stellar_melt_recovery_outcomes_append_only
+        BEFORE UPDATE OR DELETE ON cashu_stellar_melt_recovery_outcomes
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_stellar_melt_recovery_mutation();
+    `,
+    version: 13,
+  }),
 ]);
 
 export async function applyPostgresMigrations(

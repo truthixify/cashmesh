@@ -1,6 +1,6 @@
 # ADR-0024: Bind Stellar Destinations and Recover Melts Without Redispatch
 
-**Status:** Accepted
+**Status:** Accepted; scheduling boundary extended by ADR-0025
 
 **Date:** 2026-09-02
 
@@ -60,9 +60,10 @@ quote identity. A terminal lifecycle is returned before any operator observation
 restarts cannot create another network effect. Aborted reads stop recovery; they do not become release
 evidence.
 
-Keep recovery internal. Do not schedule it or expose it through the payment route until merchant
-authentication, proof-validation orchestration, protected-mint credentials, operational retry timing,
-and manual-attention handling are defined.
+Keep recovery internal. ADR-0025 defines durable jobs, fenced leases, bounded retry, and escalation,
+but no supervisor starts the worker and no payment route exposes it. Merchant authentication,
+proof-validation orchestration, protected-mint credentials, and manual-attention handling remain
+prerequisites for public orchestration.
 
 ## Consequences
 
@@ -83,9 +84,10 @@ and manual-attention handling are defined.
 ## Revisit When
 
 Introduce a versioned settlement-account registry for multiple assets, networks, or merchant-owned
-destinations. Add authenticated operator clients before protected mints. Define bounded scheduler
-leases and escalation policy before automated recovery workers. Extend the matrix to trusted-hold
-swaps only after replacement proofs and their recovery data enter durable custody before input spend.
+destinations. Add authenticated operator clients before protected mints. ADR-0025 defines the bounded
+scheduler contract; add a supervised worker process only after its operational prerequisites are met.
+Extend the matrix to trusted-hold swaps only after replacement proofs and their recovery data enter
+durable custody before input spend.
 
 ## References
 
@@ -93,3 +95,4 @@ swaps only after replacement proofs and their recovery data enter durable custod
 - [ADR-0015: Persist Payment-Scoped Cashu Proof-State Evidence](0015-persist-cashu-proof-state-evidence.md)
 - [ADR-0022: Coordinate One Fresh Stellar Melt Dispatch](0022-coordinate-fresh-stellar-melt-dispatch.md)
 - [ADR-0023: Atomically Account Confirmed Stellar Melt Payments](0023-atomically-account-stellar-melt-payments.md)
+- [ADR-0025: Schedule Melt Recovery with Fenced Leases](0025-schedule-melt-recovery-with-fenced-leases.md)

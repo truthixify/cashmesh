@@ -332,6 +332,14 @@ custody or execution authority. The acceptance operation derives the pinned Stel
 account and commits a confirmed melt's paid invoice, balanced journal, consumed event, and custody
 deletion in one transaction.
 
+Each melt effect also creates one durable recovery job. A one-shot internal worker can claim a due job
+through an append-only lease, invoke only observation recovery, and append either terminal
+acknowledgement, bounded retry timing, or sticky attention. Lease expiry permits another worker to
+reclaim a crashed attempt, while the old token cannot record an outcome afterward. Six operator
+observation attempts with a 30-second exponential delay capped at 300 seconds are the default. No API
+route or process loop starts this worker yet, and no scheduling record can authorize custody access or
+another melt request.
+
 The accounting migration takes access-exclusive locks in application write order and refuses legacy
 consumed history, any reservation not already proven released, and every request issued before route
 fingerprints. Accounting and route policy cannot be inferred safely, so those records require
@@ -395,6 +403,9 @@ enforcement, reservation lifecycle recovery, dispatch ownership, ambiguity reten
 release, atomic paid-melt accounting, journal balance and position enforcement, encrypted custody
 restart and key rotation, key/nonce exclusion, ciphertext tamper detection, terminal deletion,
 rollback, stored-record corruption, and coordinator restart with encrypted custody.
+They also cover automatic melt-job creation, v12 backfill, due-time selection, concurrent row skipping,
+lease expiry and fencing, retry replay, sticky attention, terminal lifecycle priority, and direct-writer
+constraints.
 The restart path also proves that recovery can persist `PAID` and exact `SPENT` evidence, account the
 invoice, delete custody, and replay terminal state without a second melt call.
 They do not prove endpoint authenticity, an appropriate production freshness policy, mint honesty,

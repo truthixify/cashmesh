@@ -63,8 +63,11 @@ security, legal, liquidity, and partner evidence.
 - Implemented: multi-operator, observation-only melt recovery that checks the existing quote and exact
   NUT-07 proof set without custody access or redispatch, then accepts, releases, waits, or retains
   claims for attention from the latest reservation-serialized durable evidence pair.
+- Implemented: one immutable recovery job per melt effect, append-only fenced worker leases and
+  outcomes, v12 backfill, bounded exponential observation retry, and sticky escalation through an
+  internal one-shot worker.
 - Remaining: production key management, bounded swap execution with replacement-proof custody,
-  recovery scheduling and leases, and public payment-acceptance orchestration.
+  supervised recovery process wiring, and public payment-acceptance orchestration.
 - Remaining: public verified NUT-18 payment acceptance and advisory mint support after catch-all
   conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.

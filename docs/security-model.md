@@ -291,6 +291,15 @@ durable observations under the reservation lock; a newer `PAID` or `SPENT` snaps
 claims intact. Existing terminal state returns before either operator request, and terminal events
 freeze observation appends, so restart replay cannot become network-effect permission.
 
+Recovery scheduling does not schedule dispatch. PostgreSQL creates one immutable job per melt effect
+and records worker attempts as append-only leases and outcomes. Due claims use row locks with skipping,
+then revalidate eligibility after acquiring the job lock. An expired lease may be reclaimed, but only
+the newest token can append an outcome. The worker bounds one observation attempt inside its lease,
+uses capped exponential retry, and stops automatically on invalid evidence or retry exhaustion.
+Terminal lifecycle state prevents another claim even when a worker crashed before acknowledging it.
+Clock synchronization, worker supervision, protected-mint credentials, alerts, and authorized attention
+resolution remain deployment gates.
+
 The separate acceptance operation requires that exact `PAID` observation and a later exact all-`SPENT`
 snapshot, derives the canonical testnet USDC asset account, and commits the paid invoice, balanced
 journal, consumed event, and current-custody deletion together. It reconstructs the full issued request

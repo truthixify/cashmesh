@@ -77,6 +77,9 @@ and exact NUT-07 proof set, persists both observations, and accepts or releases 
 terminal evidence; every uncertain pair retains claims for attention. Release revalidates that the
 failure pair is still latest while holding the reservation lock, and terminal state freezes later
 quote and proof observations.
+A durable job is created with each melt effect. An internal one-shot worker claims due jobs through
+append-only fenced leases and invokes only that recovery coordinator with bounded retry and escalation
+policy. It has no dispatch or custody dependency, and no worker loop is started by the API server.
 A separate atomic repository operation can accept only the current immediate-conversion Stellar
 profile after matching persisted `PAID` and exact all-`SPENT` evidence. It derives the canonical
 testnet USDC asset account and commits invoice, journal, consumed event, and custody deletion together.
@@ -109,9 +112,10 @@ ciphertext transactionally while an append-only nonce-use record remains. An int
 connect those records to one bounded zero-fee melt call for the reservation's configured mint and
 persists pending or ambiguous outcomes across restart. Confirmed immediate-conversion melts can be
 accounted internally in one transaction, but successful swaps remain blocked without replacement-proof
-custody. These capabilities are not wired into the payment endpoint. Production key management,
-protected-mint authentication, proof-validation orchestration, recovery scheduling, and public
-terminal invoice flows are not yet implemented.
+custody. Fenced recovery jobs and a bounded one-shot worker exist, but no supervisor starts them. These
+capabilities are not wired into the payment endpoint. Production key management, protected-mint
+authentication, proof-validation orchestration, worker supervision, and public terminal invoice flows
+are not yet implemented.
 
 ### Merchant Console
 
@@ -263,6 +267,10 @@ reservation proof set, persists both observations, and keeps claims active unles
 proves either paid-and-spent acceptance or expired-unpaid-and-unspent release. The release transaction
 requires that failure pair to remain the latest durable evidence, while database-serialized observation
 writes cannot extend a terminal reservation.
+Every melt effect also creates an immutable recovery job. Append-only leases and outcomes record
+worker ownership, attempt order, expiry, retry eligibility, and sticky attention. Claims use locked
+row skipping plus a post-lock history recheck; only the latest lease can append an outcome. Terminal
+lifecycle state overrides unfinished scheduling history and prevents another claim.
 The acceptance operation requires the exact persisted `PAID` observation and later all-`SPENT`
 snapshot, reconstructs and authenticates the full quote attempt and issued route set, then atomically
 stores the paid invoice, canonical Stellar USDC journal, consumed event, and custody deletion. Deferred
@@ -327,3 +335,4 @@ justify it.
 - [ADR-0022: Coordinate one fresh Stellar melt dispatch](adr/0022-coordinate-fresh-stellar-melt-dispatch.md)
 - [ADR-0023: Atomically account confirmed Stellar melt payments](adr/0023-atomically-account-stellar-melt-payments.md)
 - [ADR-0024: Bind Stellar destinations and recover melts without redispatch](adr/0024-bind-stellar-destinations-and-recover-melts.md)
+- [ADR-0025: Schedule melt recovery with fenced leases](adr/0025-schedule-melt-recovery-with-fenced-leases.md)

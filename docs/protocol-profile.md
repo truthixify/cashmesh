@@ -229,8 +229,10 @@ coordinator's post-response clock.
 The dispatch and recovery coordinators remain internal with no public payment-route wiring. The
 dispatch coordinator never interprets `PAID` as acceptance. The recovery coordinator can reach the
 atomic acceptance or release operation only after paired persisted quote and proof-state evidence; the
-terminal transaction deletes custody. Neither coordinator authenticates protected mints or schedules
-background work, and a failure after authorization can never become permission to redispatch.
+terminal transaction deletes custody. A durable one-shot worker can schedule bounded calls to the
+recovery coordinator through fenced PostgreSQL leases, but the API server starts no worker loop.
+Neither coordinator authenticates protected mints, and a failure after authorization can never become
+permission to redispatch.
 
 ## Durable Journal Scope
 
@@ -261,7 +263,7 @@ Raw Horizon, CDK, filesystem, and signing details are not adopted as stable merc
 - origin-domain signing for SEP-0007 requests;
 - production database concurrency and encrypted envelope storage;
 - event-driven quote updates;
-- recovery scheduling, leases, and operational escalation;
+- production recovery-worker supervision, protected-mint credentials, metrics, and attention handling;
 - a running `cdk-mintd` interoperability test for the acquirer quote or execution clients;
 - fees, late-payment return, or sub-cent recovery policy;
 - multiple operators sharing a clearing or settlement store; and

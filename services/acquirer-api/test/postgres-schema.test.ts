@@ -68,13 +68,14 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
     });
   });
 
-  it("migrates an empty v9 schema with required authenticated route and destination fields", async () => {
+  it("migrates an empty v9 schema with authenticated routes and recovery scheduling", async () => {
     await withTemporarySchema(async (client) => {
       await migrate(client, 9);
       await migrate(client);
 
       const state = await client.query<{
         latest_version: number;
+        recovery_jobs_exists: boolean;
         operator_count_nullable: string;
         operator_destination_nullable: string;
         quote_destination_nullable: string;
@@ -83,6 +84,8 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
         `
           SELECT
             (SELECT MAX(version) FROM cashmesh_schema_migrations) AS latest_version,
+            to_regclass(current_schema() || '.cashu_stellar_melt_recovery_jobs') IS NOT NULL
+              AS recovery_jobs_exists,
             (SELECT is_nullable FROM information_schema.columns
               WHERE table_schema = current_schema()
                 AND table_name = 'invoice_cashu_requests'
@@ -102,12 +105,44 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
         `,
       );
       expect(state.rows[0]).toEqual({
-        latest_version: 12,
+        latest_version: 13,
         operator_count_nullable: "NO",
         operator_destination_nullable: "NO",
         quote_destination_nullable: "NO",
+        recovery_jobs_exists: true,
         route_fingerprint_nullable: "NO",
       });
+    });
+  });
+
+  it("backfills one scheduled recovery job for an active v12 melt", async () => {
+    await withTemporarySchema(async (client) => {
+      await migrate(client, 12);
+      await seedV12RecoverableMelt(client);
+
+      await migrate(client);
+
+      const result = await client.query<{
+        effect_id: string;
+        initial_attempt_at: string;
+        latest_version: number;
+        payment_id: string;
+      }>(`
+        SELECT
+          job.payment_id,
+          job.effect_id,
+          job.initial_attempt_at,
+          (SELECT MAX(version) FROM cashmesh_schema_migrations) AS latest_version
+        FROM cashu_stellar_melt_recovery_jobs AS job
+      `);
+      expect(result.rows).toEqual([
+        {
+          effect_id: "effect-v12",
+          initial_attempt_at: "163",
+          latest_version: 13,
+          payment_id: "payment-v12",
+        },
+      ]);
     });
   });
 
@@ -384,6 +419,171 @@ async function seedV10IssuedRequest(client: PoolClient): Promise<void> {
         'trusted_operator'
       )
     `);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+}
+
+async function seedV12RecoverableMelt(client: PoolClient): Promise<void> {
+  await client.query("BEGIN");
+  try {
+    await client.query(`
+      INSERT INTO merchant_invoices (
+        id, merchant_id, schema_version, unit, amount, created_at, expires_at, state
+      ) VALUES ('invoice-v12', 'merchant-v12', 1, 'usdc', 1, 100, 300, 'open')
+    `);
+    await client.query(`
+      INSERT INTO invoice_creation_requests (
+        merchant_id, idempotency_key, request_fingerprint, invoice_id, created_at
+      ) VALUES ('merchant-v12', 'request-v12', repeat('1', 64), 'invoice-v12', 100)
+    `);
+    await client.query(`
+      INSERT INTO invoice_cashu_requests (
+        invoice_id,
+        merchant_id,
+        schema_version,
+        encoded_request,
+        encoding,
+        issued_at,
+        mint_policy,
+        operator_count,
+        route_set_fingerprint,
+        transport_url
+      ) VALUES (
+        'invoice-v12',
+        'merchant-v12',
+        1,
+        'creqAabc',
+        'creqA',
+        100,
+        'strict',
+        1,
+        repeat('2', 64),
+        'https://pay.cashmesh.example/v1/cashu/payments'
+      )
+    `);
+    await client.query(`
+      INSERT INTO invoice_cashu_request_operators (
+        invoice_id,
+        merchant_id,
+        position,
+        operator_id,
+        mint_url,
+        mode,
+        tier,
+        reason,
+        settlement_destination
+      ) VALUES (
+        'invoice-v12',
+        'merchant-v12',
+        0,
+        'operator-v12',
+        'https://mint-v12.example',
+        'immediate_conversion',
+        'trusted',
+        'trusted_operator',
+        'GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4'
+      )
+    `);
+    for (const table of [
+      "cashu_proof_reservations",
+      "cashu_operator_effects",
+      "cashu_proof_reservation_events",
+    ]) {
+      await client.query(`ALTER TABLE ${table} DISABLE TRIGGER USER`);
+    }
+    await client.query(`
+      INSERT INTO cashu_proof_reservations (
+        payment_id,
+        reservation_fingerprint,
+        invoice_id,
+        operator_id,
+        mint_url,
+        unit,
+        schema_version,
+        keyset_observed_at,
+        reserved_at,
+        gross_amount
+      ) VALUES (
+        'payment-v12',
+        repeat('3', 64),
+        'invoice-v12',
+        'operator-v12',
+        'https://mint-v12.example',
+        'usdc',
+        1,
+        100,
+        101,
+        1
+      )
+    `);
+    await client.query(`
+      INSERT INTO cashu_operator_effects (
+        effect_id,
+        effect_fingerprint,
+        dispatch_fingerprint,
+        payment_id,
+        invoice_id,
+        operator_id,
+        mint_url,
+        effect_kind,
+        operator_reference,
+        operator_reference_expires_at,
+        schema_version,
+        started_at
+      ) VALUES (
+        'effect-v12',
+        repeat('4', 64),
+        repeat('5', 64),
+        'payment-v12',
+        'invoice-v12',
+        'operator-v12',
+        'https://mint-v12.example',
+        'melt',
+        '019e6d5a-2347-7000-89e2-35fe79f92c0e',
+        200,
+        1,
+        103
+      )
+    `);
+    await client.query(`
+      INSERT INTO cashu_proof_reservation_events (
+        event_id,
+        event_fingerprint,
+        payment_id,
+        sequence,
+        schema_version,
+        state,
+        recorded_at,
+        effect_id,
+        evidence_kind,
+        evidence_at,
+        proof_state_snapshot_fingerprint,
+        journal_entry_id
+      ) VALUES (
+        'event-v12',
+        repeat('6', 64),
+        'payment-v12',
+        0,
+        1,
+        'dispatch_started',
+        103,
+        'effect-v12',
+        NULL,
+        NULL,
+        NULL,
+        NULL
+      )
+    `);
+    for (const table of [
+      "cashu_proof_reservations",
+      "cashu_operator_effects",
+      "cashu_proof_reservation_events",
+    ]) {
+      await client.query(`ALTER TABLE ${table} ENABLE TRIGGER USER`);
+    }
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

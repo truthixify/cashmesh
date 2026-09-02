@@ -46,6 +46,8 @@ dispatch-capable melt client and must be treated as bearer-value code.
 - Atomically accept a confirmed immediate-conversion melt only after exact `PAID` quote and all-`SPENT`
   proof evidence, committing the paid invoice, balanced journal, consumed lifecycle event, and custody
   deletion together.
+- Create one durable recovery job with every melt effect, coordinate workers through append-only fenced
+  leases, and run bounded observation retries without custody access or melt redispatch.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -111,7 +113,8 @@ See [development setup](docs/development.md), [architecture](docs/architecture.m
 [merchant accounting contract](docs/merchant-accounting.md), the
 [merchant invoice API](docs/invoice-api.md), the
 [Cashu payment-request profile](docs/cashu-payment-requests.md), the
-[experimental Stellar profile](docs/protocol-profile.md), and the [roadmap](docs/roadmap.md) before
+[experimental Stellar profile](docs/protocol-profile.md), the
+[recovery operations boundary](docs/recovery-operations.md), and the [roadmap](docs/roadmap.md) before
 implementing a network integration.
 
 ## Safety

@@ -31,3 +31,4 @@ Current decisions:
 - [ADR-0022: Coordinate One Fresh Stellar Melt Dispatch](0022-coordinate-fresh-stellar-melt-dispatch.md)
 - [ADR-0023: Atomically Account Confirmed Stellar Melt Payments](0023-atomically-account-stellar-melt-payments.md)
 - [ADR-0024: Bind Stellar Destinations and Recover Melts Without Redispatch](0024-bind-stellar-destinations-and-recover-melts.md)
+- [ADR-0025: Schedule Melt Recovery with Fenced Leases](0025-schedule-melt-recovery-with-fenced-leases.md)
