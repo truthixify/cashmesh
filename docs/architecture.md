@@ -62,10 +62,13 @@ not persist or schedule state observations, change proof reservations, or decide
 been paid. A separate bounded NUT-05 client can create and check the custom `stellar` melt quote before
 bearer dispatch. It validates the exact testnet USDC SEP-0007 profile, accepts only current UUIDv7 quote
 identifiers, and binds every check to the original amount, request, fee, method, unit, mint, and expiry.
-It does not itself persist the quote or present proofs to the operator. A separate acquirer repository
-persists one creation attempt per reserved payment before the POST, retains an ambiguous outcome without
-retry, and appends exact quote observations across restart. A melt lifecycle effect can start only from
-the same payment's matching, unexpired, currently `UNPAID` quote evidence.
+It does not itself persist the quote. A separate bounded execution client can project a live custody
+bundle into one zero-fee NUT-05 request. It fingerprints the exact endpoint and body, requires a caller
+authorization before the request, performs no retry, and returns only matching common quote fields.
+A separate acquirer repository persists one creation attempt per reserved payment before the POST,
+retains an ambiguous outcome without retry, and appends exact quote observations across restart. A
+melt lifecycle effect can start only from the same payment's matching, unexpired, currently `UNPAID`
+quote evidence. No application coordinator invokes the execution client yet.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -156,6 +159,7 @@ Cashu request adapter -> domain
 Cashu request adapter -> cashu-ts
 Cashu keyset client ---> configured operator HTTPS endpoint
 Cashu quote client ----> configured operator HTTPS endpoint
+Cashu melt client -----> configured operator HTTPS endpoint
 Cashu processor ------> stellar-settlement
 Horizon reader -------> stellar-settlement
 future payout signer --> stellar-settlement
@@ -277,3 +281,5 @@ justify it.
 - [ADR-0017: Encrypted Cashu bearer-proof custody](adr/0017-protect-cashu-bearer-proof-custody.md)
 - [ADR-0018: Bound Stellar melt quote terms](adr/0018-bound-stellar-melt-quotes.md)
 - [ADR-0019: Durable Stellar melt quote evidence](adr/0019-persist-stellar-melt-quote-evidence.md)
+- [ADR-0020: Require quote evidence for melt effects](adr/0020-require-quote-evidence-for-melt-effects.md)
+- [ADR-0021: Authorize bounded zero-fee Stellar melt dispatch](adr/0021-authorize-zero-fee-stellar-melt-dispatch.md)

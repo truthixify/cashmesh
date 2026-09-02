@@ -27,3 +27,4 @@ Current decisions:
 - [ADR-0018: Bind Stellar Melt Quote Terms Before Dispatch](0018-bound-stellar-melt-quotes.md)
 - [ADR-0019: Persist Stellar Melt Quote Evidence Before Creation](0019-persist-stellar-melt-quote-evidence.md)
 - [ADR-0020: Require Quote Evidence for Melt Effects](0020-require-quote-evidence-for-melt-effects.md)
+- [ADR-0021: Authorize Bounded Zero-Fee Stellar Melt Dispatch](0021-authorize-zero-fee-stellar-melt-dispatch.md)

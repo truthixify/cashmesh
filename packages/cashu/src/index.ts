@@ -112,6 +112,21 @@ export {
   type ObserveCashuProofStatesInput,
 } from "./proof-state-observer";
 export {
+  CASHU_STELLAR_MELT_DISPATCH_SCHEMA_VERSION,
+  type CashuStellarMeltDispatchFingerprint,
+  type CashuStellarMeltDispatchV1,
+  CashuStellarMeltExecutionClient,
+  CashuStellarMeltExecutionClientError,
+  type CashuStellarMeltExecutionClientErrorCode,
+  type CashuStellarMeltExecutionClientOptions,
+  type CashuStellarMeltExecutionResultV1,
+  DEFAULT_CASHU_STELLAR_MELT_EXECUTION_RESPONSE_BYTES,
+  DEFAULT_CASHU_STELLAR_MELT_EXECUTION_TIMEOUT_MS,
+  type ExecuteCashuStellarMeltInputV1,
+  MAX_CASHU_STELLAR_MELT_EXECUTION_RESPONSE_BYTES,
+  MAX_CASHU_STELLAR_MELT_EXECUTION_TIMEOUT_MS,
+} from "./stellar-melt-execution-client";
+export {
   CASHU_STELLAR_MELT_QUOTE_SCHEMA_VERSION,
   CASHU_STELLAR_METHOD,
   CASHU_STELLAR_TESTNET_NETWORK_PASSPHRASE,

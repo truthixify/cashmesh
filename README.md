@@ -6,7 +6,8 @@ Stellar.
 The repository contains a merchant operations console, a small acquirer API, shared invoice,
 accounting, and operator-policy rules, and a fixture-backed Stellar payment processor for stock CDK
 `0.18.0-rc.3`. It does **not** run a public Cashu mint, sign or broadcast Stellar transactions, persist
-merchant balances, or move funds.
+merchant balances, or wire a merchant flow that moves funds. The Cashu package does contain a
+dispatch-capable melt client and must be treated as bearer-value code.
 
 ## Current Capabilities
 
@@ -38,6 +39,8 @@ merchant balances, or move funds.
   and append immutable quote-state observations across restart.
 - Require every new melt effect to match that payment's persisted mint, quote ID, expiry, and current
   `UNPAID` evidence before dispatch can start.
+- Construct a canonical zero-fee `stellar` melt request, require explicit fresh-effect authorization
+  before one bounded non-retrying POST, and return only sanitized quote state.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -75,7 +78,7 @@ frameworks adapt to it at the edges.
 | `apps/merchant-console/` | Next.js merchant operations reference client |
 | `services/acquirer-api/` | Fastify policy, durable invoice API, Cashu evidence, encrypted proof custody, quote ownership, and reservation lifecycle |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
-| `packages/cashu/` | NUT-18, bounded keyset/proof/quote clients, proof integrity and fees, redacted bearer bundles, and interoperability fixtures |
+| `packages/cashu/` | NUT-18, bounded keyset/proof/quote/melt clients, proof integrity and fees, redacted bearer bundles, and interoperability fixtures |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |
 | `docs/` | Architecture, protocol, security, roadmap, development, and ADRs |
 

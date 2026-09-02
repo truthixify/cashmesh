@@ -65,6 +65,8 @@ of Cashu or Stellar implementations.
   transport ambiguity cannot become automatic retry permission.
 - Every new melt effect matches the persisted payment, mint, quote ID, expiry, and dispatch-time
   `UNPAID` evidence; exact replay never authorizes another outbound call.
+- A Stellar melt sends only after exact proof-value validation and explicit dispatch authorization;
+  the current execution profile rejects every nonzero fee reserve and performs no automatic retry.
 - A melt cannot be released as unpaid before its bound quote expires.
 - A melt quote state never substitutes for exact reserved-proof state or matching effect evidence.
 - Consumption requires matching success and a later exact all-`SPENT` snapshot.
@@ -84,6 +86,7 @@ of Cashu or Stellar implementations.
 | Melt released while its quote remains payable | Double redemption | Bound quote expiry plus post-expiry `UNPAID` and later all-`UNSPENT` evidence |
 | Rebound or malformed Stellar melt quote | Wrong payout terms or unsafe recovery | Strict SEP-0007 request validation, UUIDv7 identity, immutable-term checks, and terminal `PAID` state |
 | Duplicate quote creation after timeout | Correlation and abandoned remote state | Persist one attempt before POST; exact replay never reauthorizes creation and ambiguity is terminal for automation |
+| Melt sent without a fresh local effect | Unrecoverable or duplicate bearer-value loss | Domain-separated exact request fingerprint plus strict pre-network authorization callback |
 | Unhandled NUT-08 change | Lost recoverable value | Reject nonempty change until matching blinded-output data is durably recoverable |
 | Dishonest or insolvent operator | Merchant loss | Per-operator tiers, caps, conversion policy, suspension, diversification |
 | Forged merchant callback | Fulfillment without payment | Signed/replay-protected webhooks and merchant-side verification |
@@ -217,9 +220,10 @@ all-`UNSPENT` evidence; melt release additionally requires the `UNPAID` outcome 
 expiry. Database triggers repeat these rules and require active projections to agree with history.
 
 The lifecycle stores only sanitized identities, outcomes, timestamps, and state-snapshot fingerprints.
-It does not authenticate the outcome source, compute the canonical dispatch bytes, hold or send bearer
-proofs, call a mint, mark an invoice paid, or write a journal. A future adapter must keep secrets,
-signatures, DLEQ values, witnesses, tokens, and raw responses out of lifecycle storage and telemetry.
+It does not authenticate the outcome source, hold or send bearer proofs, call a mint, mark an invoice
+paid, or write a journal. The separate execution adapter computes canonical dispatch bytes and keeps
+secrets, signatures, DLEQ values, witnesses, tokens, and raw responses out of lifecycle storage and
+telemetry.
 
 A bounded Stellar quote client can create and check the current custom-method NUT-05 quote on one
 configured HTTPS mint. It validates the exact testnet asset, network, integer-cent amount, permitted
@@ -239,6 +243,15 @@ is enforced by the lifecycle repository and a database trigger: a new melt effec
 mint, quote ID, expiry, and current `UNPAID` evidence. Later state observations do not invalidate the
 historical dispatch binding, but they also do not prove exact proof consumption.
 
+A bounded Stellar execution client converts one live custody bundle into the exact custom NUT-05 melt
+body. It requires a matching unexpired `UNPAID` quote, zero fee reserve, and proof total equal to the
+quote amount plus the caller-supplied validated NUT-02 input fee. A domain-separated SHA-256 fingerprint
+binds the normalized endpoint, method, and exact body. Only a strict authorization callback result can
+precede the one outbound request. The transport is credential-free, bounded, redirect-free, and
+non-retrying. Returned state is sanitized and immutable terms must match. The adapter does not prove
+that the callback wrote durable state, so only the future coordinator may supply that authorization.
+Any error after authorization remains recovery-sensitive.
+
 A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. It binds
 the key ID and an exact reservation fingerprint as associated data, records every 96-bit nonce in an
 append-only key/nonce registry, permits only immutable pre-dispatch custody, and deletes the current
@@ -250,8 +263,8 @@ This does not make application memory, PostgreSQL, or backups non-custodial. Row
 physically erase old PostgreSQL page versions, WAL, replicas, snapshots, or backups. JavaScript byte
 wiping cannot erase immutable strings or undiscovered runtime copies. The built-in key-provider port has
 no production KMS or HSM adapter, access audit, per-record envelope key, or cryptographic-erasure
-mechanism. Decryption is also not dispatch authorization: a future coordinator must bind durable effect
-intent before it lets an operator adapter use the proofs.
+mechanism. Decryption is also not dispatch authorization: the future coordinator must bind durable
+effect intent before it allows the execution client's authorization callback to return `true`.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

@@ -188,6 +188,31 @@ validates the historical dispatch-time observation while allowing later `PENDING
 No coordinator yet turns the fresh effect insertion into scoped bearer decryption and one bounded
 outbound call; replay is recovery-only and must not authorize another melt.
 
+## Acquirer Melt Execution Boundary
+
+The separate execution client accepts only a live custody bundle for the configured mint, the complete
+`UNPAID` quote, and an explicit previously validated NUT-02 input fee. It currently requires
+`fee_reserve=0` and exact proof value equal to `amount + input fee`. It sends no outputs, so it cannot
+create NUT-08 change. DLEQ values and witnesses are absent from the custody bundle and request.
+
+The canonical dispatch fingerprint is SHA-256 over a domain-separated JSON record containing the exact
+normalized `/v1/melt/stellar` endpoint, `POST`, and serialized
+`{ quote, inputs, prefer_async: true }` body. Before the client can send, a callback receives only that
+fingerprint, quote ID, mint, method, and expiry and must return exactly `true`. The intended coordinator
+may return `true` only after the lifecycle repository reports a matching new effect with
+`replayed: false`.
+
+The transport sends at most once, omits credentials and referrers, rejects redirects and endpoint
+substitution, and bounds time and response bytes. It rechecks cancellation and quote expiry after
+authorization. The returned common quote fields must match the request exactly; unknown fields and
+payment preimages are discarded and nonempty change is rejected. `UNPAID`, `PENDING`, or `PAID` is an
+operator observation, not proof-state evidence or merchant acceptance.
+
+The client is dispatch-capable library code, but no acquirer coordinator invokes it. It does not load
+durable quote or keyset evidence, authenticate protected mints, record lifecycle outcomes, inspect
+NUT-07 state, delete custody, transition an invoice, or write the balanced journal. A failure after
+authorization cannot be retried automatically even when no valid response was returned.
+
 ## Durable Journal Scope
 
 The compatibility store writes a versioned JSON journal through write, file sync, atomic rename, and
@@ -217,7 +242,7 @@ Raw Horizon, CDK, filesystem, and signing details are not adopted as stable merc
 - origin-domain signing for SEP-0007 requests;
 - production database concurrency and encrypted envelope storage;
 - event-driven quote updates;
-- a running `cdk-mintd` interoperability test for the acquirer quote client;
+- a running `cdk-mintd` interoperability test for the acquirer quote or execution clients;
 - fees, late-payment return, or sub-cent recovery policy;
 - multiple operators sharing a clearing or settlement store; and
 - NUT-18 payment payload receipt and proof acceptance; strict request construction is fixture-proven.

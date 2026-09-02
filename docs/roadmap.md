@@ -51,8 +51,10 @@ security, legal, liquidity, and partner evidence.
 - Implemented: durable pre-dispatch quote attempts, single-POST authorization, ambiguity retention,
   unique mint quote ownership, and append-only terminal state history.
 - Implemented: repository- and database-enforced quote-to-melt-effect binding with historical replay.
-- Remaining: production key management, bounded swap/melt execution, and atomic paid-invoice plus
-  balanced-journal persistence.
+- Implemented: bounded zero-fee Stellar melt execution with canonical dispatch identity, explicit
+  pre-network authorization, strict response binding, and no automatic retry.
+- Remaining: production key management, the melt coordinator, bounded swap execution, and atomic
+  paid-invoice plus balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.

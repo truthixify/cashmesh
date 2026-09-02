@@ -114,7 +114,7 @@ export class CashuStellarMeltQuoteClient {
       throw invalidClock();
     }
 
-    const quote = parseQuoteResponse(response, this.mintUrl, observedAt);
+    const quote = parseCashuStellarMeltQuoteResponse(response, this.mintUrl, observedAt);
     if (quote.amount !== request.amount || quote.request !== request.request) {
       throw quoteResponseMismatch();
     }
@@ -159,8 +159,8 @@ export class CashuStellarMeltQuoteClient {
       throw invalidClock();
     }
 
-    const observed = parseQuoteResponse(response, this.mintUrl, observedAt);
-    if (!hasMatchingTerms(expected, observed)) {
+    const observed = parseCashuStellarMeltQuoteResponse(response, this.mintUrl, observedAt);
+    if (!cashuStellarMeltQuoteTermsMatch(expected, observed)) {
       throw quoteResponseMismatch();
     }
     if (expected.state === "PAID" && observed.state !== "PAID") {
@@ -305,7 +305,7 @@ function validateCheckInput(
   }
 }
 
-function parseQuoteResponse(
+export function parseCashuStellarMeltQuoteResponse(
   value: unknown,
   mintUrl: string,
   observedAt: UnixTimestamp,
@@ -342,7 +342,7 @@ function hasUnsupportedChange(value: unknown): boolean {
   return !Array.isArray(value) || value.length !== 0;
 }
 
-function hasMatchingTerms(
+export function cashuStellarMeltQuoteTermsMatch(
   expected: CashuStellarMeltQuoteV1,
   observed: CashuStellarMeltQuoteV1,
 ): boolean {

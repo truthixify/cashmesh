@@ -3,7 +3,8 @@
 **Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, offline
 proof-integrity validation, bounded public-key and proof-state observation, durable keyset and
 proof-state evidence, local proof-reference reservation, encrypted bearer custody, durable quote
-evidence, and reservation lifecycle implemented; operator dispatch and payment acceptance not implemented
+evidence, reservation lifecycle, and a zero-fee melt client implemented; coordinated operator dispatch
+and payment acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -228,10 +229,31 @@ not contact a mint, inspect custody plaintext, dispatch proofs, enforce fee caps
 state, or establish merchant payment. The lifecycle repository and PostgreSQL require every new melt
 effect to match this payment's mint, quote ID, expiry, and dispatch-time `UNPAID` evidence.
 
+## Stellar Melt Execution Adapter
+
+The separate execution client accepts that complete quote, a live restored custody bundle, and the
+already validated NUT-02 input fee. It requires an exact mint and `usdc` match, an unexpired `UNPAID`
+quote, a zero fee reserve, and proof value equal to `quote amount + input fee`. It then forms the exact
+`{ quote, inputs, prefer_async: true }` body for `POST /v1/melt/stellar`. Outputs are omitted because
+this profile permits no fee reserve or change.
+
+Before network access, the client computes a domain-separated SHA-256 fingerprint over the normalized
+endpoint, method, and exact body bytes. Its authorization callback sees only frozen dispatch metadata
+and must return exactly `true`. The future coordinator may do so only when its matching lifecycle
+effect was freshly inserted rather than replayed. Cancellation or expiry is checked again after that
+callback. The request omits credentials and referrers, rejects redirects and endpoint substitution,
+bounds time and response size, and never retries.
+
+The response must repeat every immutable quote term. Undeclared fields and payment preimages are
+discarded, while nonempty change and unknown states fail closed. Any error after authorization must be
+recovered from durable quote and proof observations rather than another melt call. The client does not
+load repository state, derive the input fee, authenticate protected mints, transition the lifecycle,
+delete custody, consume proofs, pay an invoice, or write accounting.
+
 ## Proof-Reservation Lifecycle
 
 The acquirer can persist one exact operator effect intent for a reserved payment. A swap or melt effect
-binds a local effect ID, start time, and SHA-256 fingerprint of the future adapter's canonical outbound
+binds a local effect ID, start time, and SHA-256 fingerprint of the execution adapter's canonical outbound
 operation. A melt additionally binds its NUT-05 quote ID and expiry. Immutable events reconstruct
 `dispatch_started`, melt-only `pending`, `needs_attention`, `consumed`, or `released` state across
 restart. One active invoice claim and one dispatch binding prevent competing local effects.
@@ -252,11 +274,13 @@ below the repository.
 Starting a melt additionally requires the same payment's persisted quoted outcome, exact mint, quote
 ID and expiry, a latest `UNPAID` observation no later than the effect start, and a start before expiry.
 Stored lifecycle reconstruction validates that historical state while allowing later quote observations.
-Only a future coordinator may use a fresh, non-replayed insertion to authorize one outbound call.
+Only the future coordinator may connect a fresh, non-replayed insertion to the execution client's
+authorization callback.
 
-This boundary stores sanitized effect evidence, not a trusted receipt. It does not compute the
-canonical dispatch fingerprint, authenticate a mint response, retain bearer proofs, send NUT-03 or
-NUT-05 requests, transition an invoice, write accounting, or change the public endpoint's rejection.
+This boundary stores sanitized effect evidence, not a trusted receipt. It does not authenticate a mint
+response, retain bearer proofs, send NUT-03 or NUT-05 requests, transition an invoice, write accounting,
+or change the public endpoint's rejection. The separate melt client computes the fingerprint, but no
+coordinator connects the two boundaries yet.
 
 ## Encrypted Bearer-Proof Custody
 
@@ -282,9 +306,9 @@ immutable request strings, garbage-collected copies, or crash memory.
 A terminal `consumed` or `released` event deletes current ciphertext in the same database transaction.
 That is logical retention control, not guaranteed physical erasure from PostgreSQL page history, WAL,
 replicas, snapshots, or backups. No production KMS/HSM, envelope-key, access-audit, or
-cryptographic-erasure adapter exists. The scoped decryption API does not authorize network use; a future
-dispatch coordinator must first persist the exact effect and request fingerprint before it gives proofs
-to a bounded NUT-03 or NUT-05 adapter.
+cryptographic-erasure adapter exists. The scoped decryption API does not authorize network use; the
+future dispatch coordinator must persist the exact effect and request fingerprint before it lets the
+bounded NUT-05 client send proofs.
 
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
@@ -304,6 +328,9 @@ operator redemption, or merchant settlement. Separate proof tests cover an offic
 deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. Keyset
 and proof-state observer tests cover stable metadata, exact request/response binding, unit filtering,
 concurrency, response bounds, transport timeouts, and failure paths entirely through local fixtures.
+Melt execution tests cover the exact proof body, canonical fingerprint, authorization ordering,
+redaction, expiry, amount binding, cancellation, transport bounds, and single-attempt failures through
+mocked HTTP only.
 PostgreSQL tests cover restart, historical collision rejection, freshness bounds, exact keyset and
 proof-state binding, terminal state history, concurrent replay, proof-reference exclusion, append-only
 enforcement, reservation lifecycle recovery, dispatch ownership, ambiguity retention, evidence-gated

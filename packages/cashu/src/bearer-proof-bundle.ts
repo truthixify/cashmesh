@@ -20,6 +20,7 @@ const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const TEXT_ENCODER = new TextEncoder();
 const BUNDLE_CONSTRUCTION_TOKEN = Symbol("CashuBearerProofBundleV1");
 const INITIAL_CUSTODY_BUNDLES = new WeakSet<object>();
+const BUNDLE_PLAINTEXTS = new WeakMap<CashuBearerProofBundleV1, Uint8Array>();
 
 interface StoredCashuBearerProofV1 {
   readonly amount: number;
@@ -35,6 +36,13 @@ interface StoredCashuBearerProofBundleV1 {
   readonly proofs: readonly StoredCashuBearerProofV1[];
   readonly schemaVersion: typeof CASHU_BEARER_PROOF_BUNDLE_SCHEMA_VERSION;
   readonly unit: string;
+}
+
+export interface CashuBearerMeltInputV1 {
+  readonly C: string;
+  readonly amount: number;
+  readonly id: string;
+  readonly secret: string;
 }
 
 export interface CreateCashuBearerProofBundleInputV1 {
@@ -85,6 +93,7 @@ export class CashuBearerProofBundleV1 {
     this.#initiallyValidated = initiallyValidated;
     this.#plaintext = plaintext;
     this.#proofReferences = proofReferences;
+    BUNDLE_PLAINTEXTS.set(this, plaintext);
     if (initiallyValidated) {
       INITIAL_CUSTODY_BUNDLES.add(this);
     }
@@ -93,6 +102,7 @@ export class CashuBearerProofBundleV1 {
 
   destroy(): void {
     INITIAL_CUSTODY_BUNDLES.delete(this);
+    BUNDLE_PLAINTEXTS.delete(this);
     this.#plaintext.fill(0);
     this.#plaintext = new Uint8Array();
   }
@@ -129,6 +139,32 @@ export class CashuBearerProofBundleV1 {
   toString(): string {
     return "CashuBearerProofBundleV1 [REDACTED]";
   }
+}
+
+export function withCashuBearerMeltInputsV1<T>(
+  bundle: CashuBearerProofBundleV1,
+  use: (inputs: readonly CashuBearerMeltInputV1[]) => T,
+): T {
+  const plaintext = BUNDLE_PLAINTEXTS.get(bundle);
+  if (
+    !(bundle instanceof CashuBearerProofBundleV1) ||
+    plaintext === undefined ||
+    typeof use !== "function"
+  ) {
+    return failInvalidBundle();
+  }
+  const stored = JSON.parse(TEXT_DECODER.decode(plaintext)) as StoredCashuBearerProofBundleV1;
+  const inputs = Object.freeze(
+    stored.proofs.map((proof) =>
+      Object.freeze({
+        C: proof.signature,
+        amount: proof.amount,
+        id: proof.keysetId,
+        secret: proof.secret,
+      }),
+    ),
+  );
+  return use(inputs);
 }
 
 export function isCashuBearerProofBundleValidatedForInitialCustodyV1(
