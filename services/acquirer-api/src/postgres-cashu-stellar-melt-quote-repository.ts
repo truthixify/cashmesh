@@ -3,6 +3,7 @@ import {
   CASHU_STELLAR_UNIT,
   type CashuStellarMeltQuoteRequestV1,
   type CashuStellarMeltQuoteV1,
+  cashuStellarMeltRequestDestination,
   createCashuStellarMeltQuoteRequestV1,
   createCashuStellarMeltQuoteV1,
   MAX_CASHU_STELLAR_MELT_QUOTE_TTL_SECONDS,
@@ -68,8 +69,10 @@ interface ReservationContextRow extends QueryResultRow {
   readonly payment_id: string;
   readonly reservation_schema_version: number;
   readonly reservation_unit: string;
+  readonly route_mode: string;
   readonly reserved_at: string;
   readonly reserved_proof_count: string;
+  readonly settlement_destination: string;
 }
 
 interface PreDispatchRow extends QueryResultRow {
@@ -116,6 +119,7 @@ const ATTEMPT_SELECT = `
     amount,
     request,
     schema_version,
+    settlement_destination,
     started_at
   FROM cashu_stellar_melt_quote_attempts
 `;
@@ -238,9 +242,10 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
               amount,
               request,
               schema_version,
+              settlement_destination,
               started_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT DO NOTHING
             RETURNING
               attempt_id,
@@ -254,6 +259,7 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
               amount,
               request,
               schema_version,
+              settlement_destination,
               started_at
           `,
           [
@@ -268,6 +274,7 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
             attempt.request.amount,
             attempt.request.request,
             attempt.schemaVersion,
+            attempt.settlementDestination,
             attempt.startedAt,
           ],
         );
@@ -453,6 +460,7 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
     try {
       const validated = validateQuoteInput(input);
       return await this.withTransaction(async (client) => {
+        await this.lockReservation(client, validated.paymentId);
         const row = await this.lockAttempt(client, validated.attemptId, validated.paymentId);
         const attempt = mapAttemptBase(row);
         const outcome = await this.findOutcome(client, attempt.attemptId);
@@ -479,6 +487,7 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
           return Object.freeze({ attempt: await this.mapAttempt(client, row), replayed: true });
         }
 
+        await this.assertObservationWritable(client, attempt.paymentId);
         const latest = await this.findLatestObservation(client, attempt.attemptId);
         if (
           latest === undefined ||
@@ -514,6 +523,8 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
           invoice.created_at,
           invoice.expires_at,
           invoice.state AS invoice_state,
+          route.mode AS route_mode,
+          route.settlement_destination,
           custody.created_at AS custody_created_at,
           (SELECT COUNT(*) FROM cashu_reserved_proofs WHERE payment_id = $1)
             AS reserved_proof_count,
@@ -525,6 +536,10 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
             AS event_count
         FROM cashu_proof_reservations AS reservation
         JOIN merchant_invoices AS invoice ON invoice.id = reservation.invoice_id
+        JOIN invoice_cashu_request_operators AS route
+          ON route.invoice_id = reservation.invoice_id
+          AND route.operator_id = reservation.operator_id
+          AND route.mint_url = reservation.mint_url
         LEFT JOIN cashu_bearer_proof_custody AS custody
           ON custody.payment_id = reservation.payment_id
         WHERE reservation.payment_id = $1
@@ -635,6 +650,25 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
     const row = result.rows[0];
     if (row === undefined || !row.has_custody || row.has_effect || row.has_event) {
       failInvalidTransition();
+    }
+  }
+
+  private async assertObservationWritable(
+    client: PoolClient,
+    requestedPaymentId: PaymentId,
+  ): Promise<void> {
+    const result = await client.query<{ state: string }>(
+      `
+        SELECT state
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = $1
+        ORDER BY sequence DESC
+        LIMIT 1
+      `,
+      [requestedPaymentId],
+    );
+    if (["consumed", "released"].includes(result.rows[0]?.state ?? "")) {
+      return failInvalidTransition();
     }
   }
 
@@ -900,6 +934,7 @@ function createAttemptFromContext(
       paymentId: paymentId(row.payment_id),
       request: input.request,
       schemaVersion: CASHU_STELLAR_MELT_QUOTE_ATTEMPT_SCHEMA_VERSION,
+      settlementDestination: cashuStellarMeltRequestDestination(input.request),
       startedAt: input.startedAt,
     };
     return Object.freeze({ ...base, attemptFingerprint: createAttemptFingerprint(base) });
@@ -932,6 +967,15 @@ function assertBeginPreconditions(attempt: StoredAttemptBase, row: ReservationCo
     row.invoice_unit !== CASHU_STELLAR_UNIT
   ) {
     failInvalidRecord();
+  }
+  if (
+    row.route_mode !== "immediate_conversion" ||
+    row.settlement_destination !== attempt.settlementDestination
+  ) {
+    throw new CashuStellarMeltQuoteRepositoryError(
+      "terms_mismatch",
+      "Cashu Stellar melt destination does not match the authorized settlement route.",
+    );
   }
   if (parseSafeInteger(row.invoice_amount) !== attempt.request.amount) {
     throw new CashuStellarMeltQuoteRepositoryError(

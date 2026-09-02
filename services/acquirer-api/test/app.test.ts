@@ -10,6 +10,7 @@ import { FakeInvoiceRepository } from "./fake-invoice-repository";
 const NOW = 1_788_000_000;
 const EXPIRES_AT = NOW + 300;
 const PAYMENT_PROOF_SECRET = "payment-proof-secret-must-not-be-logged";
+const STELLAR_SETTLEMENT_DESTINATION = "GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4";
 const CASHU_PAYMENT_REQUEST_ISSUER = new CashuPaymentRequestIssuer({
   operators: [
     {
@@ -497,6 +498,7 @@ function createApp(
         return `inv_test-${String(invoiceSequence).padStart(4, "0")}`;
       }),
     invoiceRepository: repository,
+    stellarSettlementDestination: STELLAR_SETTLEMENT_DESTINATION,
     ...(options.logger !== undefined && { logger: options.logger }),
   });
   apps.push(app);

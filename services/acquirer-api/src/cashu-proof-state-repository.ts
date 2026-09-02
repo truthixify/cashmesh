@@ -40,6 +40,7 @@ export type CashuProofStateRepositoryErrorCode =
   | "proof_set_mismatch"
   | "reservation_not_found"
   | "reservation_scope_mismatch"
+  | "reservation_terminal"
   | "spent_state_regression"
   | "storage_unavailable";
 

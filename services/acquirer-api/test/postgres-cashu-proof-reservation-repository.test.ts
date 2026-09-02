@@ -517,6 +517,7 @@ function invoiceRecord(
     idempotencyKey: idempotencyKey(overrides.idempotencyKey ?? "checkout-001"),
     invoice,
     requestFingerprint: "c".repeat(64),
+    settlementDestination: "GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4",
   };
 }
 

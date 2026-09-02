@@ -59,6 +59,10 @@ current quote boundary does not prove that its destination came from server-owne
 Keep accounting internal until quote creation binds an authorized destination; a valid arbitrary
 destination must never be enough to credit a CashMesh-controlled settlement asset.
 
+ADR-0024 completes this prerequisite for newly issued routes and adds the observation-only recovery
+coordinator. This operation remains internal because public payment orchestration and operational
+controls are still absent.
+
 The accounting migration takes access-exclusive locks on invoice creation, invoices, issued requests,
 routes, reservations, and lifecycle events in application write order before inspecting legacy state.
 It fails when legacy `consumed` history, any reservation not proven `released`, or any pre-fingerprint
@@ -85,12 +89,10 @@ non-payable.
 
 ## Revisit When
 
-Add a recovery coordinator that observes the bound quote and proof set without redispatch, then calls
-this operation with deterministic identifiers. Bind quote destinations to server-owned merchant or
-settlement configuration before wiring that coordinator to accounting. Add a versioned
-settlement-asset registry before supporting another network or asset. Extend acceptance to
-trusted-hold swaps only after replacement proofs, output amounts, fees, and recovery data are durably
-bound before bearer input is spent.
+Add a versioned settlement-asset registry before supporting another network, asset, or per-merchant
+destination. Extend acceptance to trusted-hold swaps only after replacement proofs, output amounts,
+fees, and recovery data are durably bound before bearer input is spent. See ADR-0024 for the completed
+server-owned destination and no-redispatch recovery prerequisites.
 
 ## References
 
@@ -99,3 +101,4 @@ bound before bearer input is spent.
 - [ADR-0017: Protect Cashu Bearer Proofs in Encrypted Custody](0017-protect-cashu-bearer-proof-custody.md)
 - [ADR-0020: Require Quote Evidence for Melt Effects](0020-require-quote-evidence-for-melt-effects.md)
 - [ADR-0022: Coordinate One Fresh Stellar Melt Dispatch](0022-coordinate-fresh-stellar-melt-dispatch.md)
+- [ADR-0024: Bind Stellar Destinations and Recover Melts Without Redispatch](0024-bind-stellar-destinations-and-recover-melts.md)

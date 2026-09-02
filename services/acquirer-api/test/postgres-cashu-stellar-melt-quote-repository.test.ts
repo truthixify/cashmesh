@@ -56,6 +56,7 @@ const PROOF_Y_B = "02ab1c4a13001bbc881cf2d568048d414008ac94e0bde1cb05e96076553b1
 const QUOTE_ID = "01890f3c-7b62-7a4f-bc7d-1a2b3c4d5e6f";
 const OTHER_QUOTE_ID = "01890f3c-7b63-7f41-8d2e-2b3c4d5e6f70";
 const DESTINATION = "GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4";
+const MUXED_DESTINATION = "MA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAAAAAAAAAPCICBKU";
 const REQUEST = paymentRequest(1);
 const repositories: Array<{ close(): Promise<void> }> = [];
 const REQUEST_ISSUER = new CashuPaymentRequestIssuer({
@@ -63,6 +64,7 @@ const REQUEST_ISSUER = new CashuPaymentRequestIssuer({
     {
       mintUrl: MINT_URL,
       operatorId: operatorId("operator-a"),
+      requestedMode: "immediate_conversion",
       tier: "trusted",
     },
   ],
@@ -292,6 +294,13 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu Stellar melt quote
     await expect(
       repository.begin(beginInput({ amount: 2, request: paymentRequest(2) })),
     ).rejects.toMatchObject({ code: "terms_mismatch" });
+    await expect(
+      repository.begin(
+        beginInput({
+          request: paymentRequest(1, MUXED_DESTINATION),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "terms_mismatch" });
     await expect(repository.begin(beginInput({ startedAt: CUSTODY_AT - 1 }))).rejects.toMatchObject(
       { code: "invoice_window_closed" },
     );
@@ -312,6 +321,61 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu Stellar melt quote
       repository.begin(beginInput({ paymentId: "payment-missing" })),
     ).rejects.toMatchObject({ code: "reservation_not_found" });
     await expectQuoteCounts({ attempts: 0, observations: 0, outcomes: 0 });
+  });
+
+  it("rejects a different settlement destination below the repository", async () => {
+    await seedActiveReservation();
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      const error = await errorFromAsync(() =>
+        pool.query(
+          `
+            INSERT INTO cashu_stellar_melt_quote_attempts (
+              attempt_id,
+              attempt_fingerprint,
+              payment_id,
+              invoice_id,
+              operator_id,
+              mint_url,
+              method,
+              unit,
+              amount,
+              request,
+              schema_version,
+              settlement_destination,
+              started_at
+            )
+            VALUES (
+              'attempt-direct',
+              $1,
+              'payment-001',
+              'invoice-001',
+              'operator-a',
+              $2,
+              'stellar',
+              'usdc',
+              1,
+              $3,
+              1,
+              $4,
+              $5
+            )
+          `,
+          [
+            sha256("attempt-direct"),
+            MINT_URL,
+            paymentRequest(1, MUXED_DESTINATION),
+            MUXED_DESTINATION,
+            ATTEMPT_STARTED_AT,
+          ],
+        ),
+      );
+
+      expect(error).toMatchObject({ code: "23514" });
+      await expectQuoteCounts({ attempts: 0, observations: 0, outcomes: 0 });
+    } finally {
+      await pool.end();
+    }
   });
 
   it("binds initial quote terms and prevents quote identity reuse at one mint", async () => {
@@ -645,13 +709,13 @@ function quote(overrides: Partial<CreateCashuStellarMeltQuoteInputV1> = {}) {
   });
 }
 
-function paymentRequest(amount: number): string {
+function paymentRequest(amount: number, destination = DESTINATION): string {
   const decimalAmount = `${Math.floor(amount / 100)}.${String(amount % 100).padStart(2, "0")}`;
   const parameters = new URLSearchParams({
     amount: decimalAmount,
     asset_code: CASHU_STELLAR_TESTNET_USDC_ASSET_CODE,
     asset_issuer: CASHU_STELLAR_TESTNET_USDC_ISSUER,
-    destination: DESTINATION,
+    destination,
     network_passphrase: CASHU_STELLAR_TESTNET_NETWORK_PASSPHRASE,
   });
   return `web+stellar:pay?${parameters.toString()}`;
@@ -670,6 +734,7 @@ function invoiceRecord(requestedInvoiceId: string): CreateOpenInvoiceRecord {
     idempotencyKey: idempotencyKey(`checkout-${requestedInvoiceId}`),
     invoice,
     requestFingerprint: sha256(requestedInvoiceId),
+    settlementDestination: DESTINATION,
   };
 }
 

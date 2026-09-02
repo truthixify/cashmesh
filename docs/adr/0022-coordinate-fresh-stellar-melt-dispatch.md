@@ -61,10 +61,9 @@ internal; the public payment endpoint remains non-accepting.
 
 ## Revisit When
 
-Add a recovery worker that checks the bound NUT-05 quote and exact NUT-07 proof set without redispatch.
-Connect confirmed `PAID` plus all-`SPENT` evidence to one atomic paid-invoice and balanced-journal
-transaction. Add protected-mint authentication through a reviewed credential port. Accept nonzero fee
-reserve only after persisting blinded outputs before authorization and recovering change after restart.
+Add protected-mint authentication through a reviewed credential port. Accept nonzero fee reserve only
+after persisting blinded outputs before authorization and recovering change after restart. See
+ADR-0023 for atomic accounting and ADR-0024 for the completed no-redispatch recovery coordinator.
 
 ## References
 
@@ -72,5 +71,7 @@ reserve only after persisting blinded outputs before authorization and recoverin
 - [ADR-0017: Protect Cashu Bearer Proofs in Encrypted Custody](0017-protect-cashu-bearer-proof-custody.md)
 - [ADR-0020: Require Quote Evidence for Melt Effects](0020-require-quote-evidence-for-melt-effects.md)
 - [ADR-0021: Authorize Bounded Zero-Fee Stellar Melt Dispatch](0021-authorize-zero-fee-stellar-melt-dispatch.md)
+- [ADR-0023: Atomically Account Confirmed Stellar Melt Payments](0023-atomically-account-stellar-melt-payments.md)
+- [ADR-0024: Bind Stellar Destinations and Recover Melts Without Redispatch](0024-bind-stellar-destinations-and-recover-melts.md)
 - [Cashu NUT-02 keyset fees](https://github.com/cashubtc/nuts/blob/main/02.md)
 - [Cashu NUT-05 melt quotes and execution](https://github.com/cashubtc/nuts/blob/main/05.md)

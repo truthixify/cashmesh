@@ -58,8 +58,13 @@ security, legal, liquidity, and partner evidence.
 - Implemented: atomic immediate-conversion melt acceptance from exact persisted `PAID` plus all-`SPENT`
   evidence, with a paid invoice, balanced journal, consumed event, and custody deletion in one
   PostgreSQL transaction.
+- Implemented: server-owned Stellar destination binding across invoice routes, immutable route and
+  quote fingerprints, and database-enforced immediate-conversion quote attempts.
+- Implemented: multi-operator, observation-only melt recovery that checks the existing quote and exact
+  NUT-07 proof set without custody access or redispatch, then accepts, releases, waits, or retains
+  claims for attention from the latest reservation-serialized durable evidence pair.
 - Remaining: production key management, bounded swap execution with replacement-proof custody,
-  recovery observation, and public payment-acceptance orchestration.
+  recovery scheduling and leases, and public payment-acceptance orchestration.
 - Remaining: public verified NUT-18 payment acceptance and advisory mint support after catch-all
   conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.

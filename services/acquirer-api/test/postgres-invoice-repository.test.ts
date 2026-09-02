@@ -28,6 +28,7 @@ const DATABASE_URL = process.env.CASHMESH_TEST_DATABASE_URL;
 const repositories: Array<{ close(): Promise<void> }> = [];
 const KEYSET_MINT_URL = "https://mint-keys.cashmesh.example";
 const KEYSET_OBSERVED_AT = 1_788_100_000;
+const STELLAR_SETTLEMENT_DESTINATION = "GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4";
 const VERSION_ZERO_KEYSET_ID = "000f715baf5d4c2e";
 const VERSION_ZERO_PUBLIC_KEY =
   "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -127,6 +128,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
       clock: () => 1_788_000_000,
       invoiceIdFactory: () => "invoice-api-001",
       invoiceRepository: firstRepository,
+      stellarSettlementDestination: STELLAR_SETTLEMENT_DESTINATION,
     });
     const first = await firstApp.inject({
       method: "POST",
@@ -149,6 +151,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
         throw new Error("Replay must not generate a new invoice identifier.");
       },
       invoiceRepository: restartedRepository,
+      stellarSettlementDestination: STELLAR_SETTLEMENT_DESTINATION,
     });
     const replay = await restartedApp.inject({
       method: "POST",
@@ -336,7 +339,15 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
         pool.query(
           `
             INSERT INTO invoice_cashu_request_operators (
-              invoice_id, merchant_id, position, operator_id, mint_url, mode, tier, reason
+              invoice_id,
+              merchant_id,
+              position,
+              operator_id,
+              mint_url,
+              mode,
+              tier,
+              reason,
+              settlement_destination
             )
             VALUES (
               'invoice-001',
@@ -346,9 +357,11 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
               'https://mint-appended.example',
               'immediate_conversion',
               'convertible',
-              'conversion_required'
+              'conversion_required',
+              $1
             )
           `,
+          [STELLAR_SETTLEMENT_DESTINATION],
         ),
       );
 
@@ -934,6 +947,7 @@ function record(
     idempotencyKey: idempotencyKey(overrides.idempotencyKey ?? "checkout-001"),
     invoice,
     requestFingerprint: overrides.fingerprint ?? "a".repeat(64),
+    settlementDestination: STELLAR_SETTLEMENT_DESTINATION,
   };
 }
 

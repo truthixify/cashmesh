@@ -7,8 +7,8 @@ The acquirer API persists version `1` USDC invoices in PostgreSQL and requires a
 idempotency key for every creation request. It can inspect and bind a NUT-18 payment envelope, but it
 does not yet authenticate merchants or validate proofs in the HTTP path. Internal repositories can
 reserve sanitized proof references, persist matching NUT-07 and Stellar quote evidence, coordinate a
-bounded melt, and atomically transition an invoice to `paid` with its journal after confirmation. None
-of that acceptance flow is connected to the public endpoint.
+bounded melt, recover it without redispatch, and atomically transition an invoice to `paid` with its
+journal after confirmation. None of that acceptance flow is connected to the public endpoint.
 
 ## Create an Invoice
 
@@ -79,14 +79,17 @@ The identifier and shortened encoded request above are illustrative. Runtime ide
 server-generated UUID with an `inv_` prefix. The actual `encodedRequest` is a complete padded
 base64url `creqA` value.
 
-The server, not the HTTP caller, supplies accepted operator routes and the transport. Production
-requires `CASHMESH_CASHU_OPERATOR_ROUTES` and `CASHMESH_CASHU_TRANSPORT_URL`; startup rejects invalid,
-unlisted, duplicate, unsafe, or oversized profiles. Local defaults use non-routable `.example` URLs.
+The server, not the HTTP caller, supplies accepted operator routes, the transport, and the Stellar
+settlement destination. Production requires `CASHMESH_CASHU_OPERATOR_ROUTES`,
+`CASHMESH_CASHU_TRANSPORT_URL`, and `CASHMESH_STELLAR_SETTLEMENT_DESTINATION`; startup rejects invalid,
+unlisted, duplicate, unsafe, oversized, or checksum-invalid profiles. Local defaults use non-routable
+`.example` URLs and an unfunded test address.
 
 ## Idempotency Contract
 
 An idempotency key contains the same constrained characters as other durable identifiers and is scoped
-to one merchant. CashMesh hashes a canonical tuple of merchant, amount, expiry, and invoice schema.
+to one merchant. CashMesh hashes a canonical tuple of merchant, amount, expiry, settlement destination,
+and invoice schema.
 
 - Repeating the exact tuple returns the originally committed invoice and Cashu request with `200 OK`,
   `Idempotency-Replayed: true`, and `replayed: true`.
@@ -161,9 +164,10 @@ The Cashu package has a deterministic offline proof validator and bounded NUT-07
 acquirer repositories can load explicit keyset observations, reserve sanitized proof references,
 persist exact payment-scoped proof-state evidence, manage lifecycle claims, encrypt the minimum spend
 bundle for an exact reservation, coordinate one fresh zero-fee melt against stored quote evidence,
-and atomically account a confirmed immediate-conversion melt. The HTTP service does not orchestrate
-those capabilities. Internal dispatch alone is therefore intentionally not enough to change the
-endpoint response.
+recover the existing melt from paired quote and proof-state observations without redispatch, and
+atomically account a confirmed immediate-conversion melt. The HTTP service does not orchestrate those
+capabilities. Internal dispatch alone is therefore intentionally not enough to change the endpoint
+response.
 
 | Status | Meaning |
 |---:|---|
@@ -214,7 +218,8 @@ The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state mi
 - append-only key/nonce use across terminal histories; and
 - automatic current-ciphertext deletion on `consumed` or `released` lifecycle events;
 - one immutable Stellar melt quote attempt per payment, requiring its open invoice, active reservation,
-  and encrypted custody before the single authorized creation call; and
+  encrypted custody, server-owned destination, and immediate-conversion route before the single
+  authorized creation call; and
 - one immutable quote outcome plus append-only, term-bound observations with terminal `PAID` history;
 - full quote-attempt reconstruction and fingerprint verification before dispatch or acceptance; and
 - one exact quote-to-melt-effect binding enforced by repository checks and a database trigger;
@@ -223,7 +228,7 @@ The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state mi
 - a consumed event, exact persisted `PAID` melt observation, later all-`SPENT` snapshot, issued
   immediate-conversion route, and paid invoice that must commit as one coherent record; and
 - append-only issued route decisions, rejection of reservations against unauthenticated legacy route
-  sets, and atomic current-ciphertext deletion at acceptance.
+  sets, exact destination binding, and atomic current-ciphertext deletion at acceptance.
 
 Keyset, proof-reference, proof-state, quote, and lifecycle persistence are separate repository capabilities.
 Invoice issuance and HTTP payment intake do not automatically observe a mint, select a freshness
@@ -247,6 +252,10 @@ inferred, and migration cannot leave an issued invoice silently unreadable. Depl
 explicitly backfill those records before upgrade. Persisting `expired` or `cancelled` records still
 requires a later migration with state-specific fields and checks.
 
+The destination-binding migration refuses every existing issued request because it cannot infer
+whether a historical SEP-0007 destination was server-owned. Deployments must retire those requests or
+perform an explicitly reviewed destination backfill before applying migration 11.
+
 ## Error and Privacy Boundary
 
 Shape and identifier failures return `400`; semantic invoice failures return `422`; changed
@@ -267,8 +276,9 @@ Bearer-proof ciphertext is still custody. Logical terminal deletion does not gua
 from PostgreSQL page history, WAL, replicas, snapshots, or backups, and the local key-provider port is
 not a production key-management implementation. The internal melt coordinator wires scoped decryption
 to canonical outbound request binding only after a fresh durable effect insert. Do not expose that
-capability through this route until proof-validation orchestration, recovery observation,
-authentication, and operational controls are also complete.
+capability through this route until proof-validation orchestration, authentication, recovery
+scheduling, and operational controls are also complete. The separate recovery coordinator cannot
+access custody or execution and therefore cannot authorize a second melt.
 
 Automatic HTTP access logs are disabled because request paths contain merchant and invoice identifiers.
 Do not enable framework request logging without replacing raw URLs with reviewed route templates and

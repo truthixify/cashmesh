@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { CashuPaymentRequestIssuer } from "@cashmesh/cashu";
+import {
+  type CashuPaymentRequestIssuer,
+  type CashuStellarSettlementDestination,
+  cashuStellarSettlementDestination,
+} from "@cashmesh/cashu";
 import {
   createInvoiceV1,
   idempotencyKey,
@@ -34,6 +38,7 @@ export interface FindMerchantInvoiceInput {
 export interface InvoiceServiceOptions {
   readonly clock?: () => number;
   readonly invoiceIdFactory?: () => string;
+  readonly settlementDestination: string;
 }
 
 export type InvoiceServiceErrorCode =
@@ -57,14 +62,16 @@ export class InvoiceServiceError extends Error {
 export class InvoiceService {
   private readonly clock: () => number;
   private readonly invoiceIdFactory: () => string;
+  private readonly settlementDestination: CashuStellarSettlementDestination;
 
   constructor(
     private readonly repository: InvoiceRepository,
     private readonly cashuPaymentRequestIssuer: Pick<CashuPaymentRequestIssuer, "issue">,
-    options: InvoiceServiceOptions = {},
+    options: InvoiceServiceOptions,
   ) {
     this.clock = options.clock ?? (() => Math.floor(Date.now() / 1_000));
     this.invoiceIdFactory = options.invoiceIdFactory ?? (() => `inv_${randomUUID()}`);
+    this.settlementDestination = cashuStellarSettlementDestination(options.settlementDestination);
   }
 
   async create(input: CreateMerchantInvoiceInput): Promise<CreateOpenInvoiceResult> {
@@ -96,6 +103,7 @@ export class InvoiceService {
       amount,
       expiresAt,
       merchantId: ownerId,
+      settlementDestination: this.settlementDestination,
     });
     try {
       const existingInvoice = await this.repository.findInvoiceCreation({
@@ -163,6 +171,7 @@ export class InvoiceService {
           idempotencyKey: requestKey,
           invoice,
           requestFingerprint,
+          settlementDestination: this.settlementDestination,
         });
       } catch (error) {
         if (
@@ -201,11 +210,13 @@ function fingerprintRequest(input: {
   readonly amount: number;
   readonly expiresAt: number;
   readonly merchantId: string;
+  readonly settlementDestination: string;
 }): string {
   const canonicalRequest = JSON.stringify({
     amount: input.amount,
     expiresAt: input.expiresAt,
     merchantId: input.merchantId,
+    settlementDestination: input.settlementDestination,
     schemaVersion: 1,
   });
   return createHash("sha256").update(canonicalRequest, "utf8").digest("hex");

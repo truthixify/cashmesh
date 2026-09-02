@@ -2798,6 +2798,215 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 10,
   }),
+  Object.freeze({
+    name: "bind_stellar_settlement_destinations",
+    sql: `
+      LOCK TABLE
+        invoice_creation_requests,
+        merchant_invoices,
+        invoice_cashu_requests,
+        invoice_cashu_request_operators,
+        cashu_proof_reservations,
+        cashu_stellar_melt_quote_attempts
+        IN ACCESS EXCLUSIVE MODE;
+
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM invoice_cashu_requests) THEN
+          RAISE EXCEPTION 'Stellar settlement destination migration requires an explicit issued-route backfill'
+            USING ERRCODE = 'check_violation';
+        END IF;
+      END
+      $$;
+
+      ALTER TABLE invoice_cashu_request_operators
+        ADD COLUMN settlement_destination VARCHAR(69) NOT NULL,
+        ADD CONSTRAINT invoice_cashu_request_operators_settlement_destination CHECK (
+          settlement_destination ~ '^(G[A-Z2-7]{55}|M[A-Z2-7]{68})$'
+        ),
+        ADD CONSTRAINT invoice_cashu_operators_settlement_route_unique UNIQUE (
+          invoice_id,
+          operator_id,
+          mint_url,
+          settlement_destination
+        );
+
+      ALTER TABLE cashu_stellar_melt_quote_attempts
+        ADD COLUMN settlement_destination VARCHAR(69) NOT NULL,
+        ADD CONSTRAINT cashu_stellar_quote_attempts_settlement_destination CHECK (
+          settlement_destination ~ '^(G[A-Z2-7]{55}|M[A-Z2-7]{68})$'
+        ),
+        ADD CONSTRAINT cashu_stellar_quote_attempts_settlement_route_fkey
+          FOREIGN KEY (
+            invoice_id,
+            operator_id,
+            mint_url,
+            settlement_destination
+          )
+          REFERENCES invoice_cashu_request_operators (
+            invoice_id,
+            operator_id,
+            mint_url,
+            settlement_destination
+          )
+          ON DELETE RESTRICT;
+
+      CREATE FUNCTION cashmesh_validate_stellar_quote_destination()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        route_destination VARCHAR(69);
+        route_mode TEXT;
+      BEGIN
+        SELECT operator.settlement_destination, operator.mode
+        INTO route_destination, route_mode
+        FROM invoice_cashu_request_operators AS operator
+        WHERE operator.invoice_id = NEW.invoice_id
+          AND operator.operator_id = NEW.operator_id
+          AND operator.mint_url = NEW.mint_url;
+
+        IF NOT FOUND
+          OR route_mode <> 'immediate_conversion'
+          OR route_destination <> NEW.settlement_destination
+        THEN
+          RAISE EXCEPTION 'Cashu Stellar melt quote requires its authorized settlement route'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_quote_attempts_destination_valid
+        BEFORE INSERT ON cashu_stellar_melt_quote_attempts
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_stellar_quote_destination();
+    `,
+    version: 11,
+  }),
+  Object.freeze({
+    name: "serialize_terminal_melt_recovery",
+    sql: `
+      LOCK TABLE
+        cashu_proof_reservations,
+        cashu_stellar_melt_quote_observations,
+        cashu_proof_state_observations,
+        cashu_proof_reservation_events
+        IN ACCESS EXCLUSIVE MODE;
+
+      CREATE FUNCTION cashmesh_guard_cashu_observation_append()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        latest_state TEXT;
+      BEGIN
+        PERFORM payment_id
+        FROM cashu_proof_reservations
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'Cashu observation requires its reservation'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        SELECT state INTO latest_state
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = NEW.payment_id
+        ORDER BY sequence DESC
+        LIMIT 1;
+
+        IF latest_state IN ('consumed', 'released') THEN
+          RAISE EXCEPTION 'Cashu observations cannot extend a terminal reservation'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+        END IF;
+
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_stellar_quote_observations_terminal_guard
+        BEFORE INSERT ON cashu_stellar_melt_quote_observations
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_guard_cashu_observation_append();
+
+      CREATE TRIGGER cashu_proof_state_observations_terminal_guard
+        BEFORE INSERT ON cashu_proof_state_observations
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_guard_cashu_observation_append();
+
+      CREATE FUNCTION cashmesh_validate_latest_melt_release_evidence()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        effect_record cashu_operator_effects%ROWTYPE;
+        latest_proof_fingerprint CHAR(64);
+        latest_proof_observed_at BIGINT;
+        latest_quote_expiry BIGINT;
+        latest_quote_id VARCHAR(36);
+        latest_quote_observed_at BIGINT;
+        latest_quote_state TEXT;
+      BEGIN
+        IF NEW.state <> 'released' OR NEW.evidence_kind <> 'melt_unpaid_after_expiry' THEN
+          RETURN NEW;
+        END IF;
+
+        PERFORM payment_id
+        FROM cashu_proof_reservations
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        SELECT * INTO effect_record
+        FROM cashu_operator_effects
+        WHERE effect_id = NEW.effect_id
+          AND payment_id = NEW.payment_id;
+
+        SELECT observation.state, observation.observed_at, observation.quote_id, outcome.expiry
+          INTO latest_quote_state, latest_quote_observed_at, latest_quote_id, latest_quote_expiry
+        FROM cashu_stellar_melt_quote_observations AS observation
+        JOIN cashu_stellar_melt_quote_outcomes AS outcome
+          ON outcome.attempt_id = observation.attempt_id
+          AND outcome.payment_id = observation.payment_id
+          AND outcome.mint_url = observation.mint_url
+          AND outcome.quote_id = observation.quote_id
+        WHERE observation.payment_id = NEW.payment_id
+        ORDER BY observation.observed_at DESC
+        LIMIT 1;
+
+        SELECT snapshot_fingerprint, observed_at
+          INTO latest_proof_fingerprint, latest_proof_observed_at
+        FROM cashu_proof_state_observations
+        WHERE payment_id = NEW.payment_id
+        ORDER BY observed_at DESC
+        LIMIT 1;
+
+        IF effect_record.effect_id IS NULL
+          OR effect_record.effect_kind <> 'melt'
+          OR latest_quote_state IS DISTINCT FROM 'UNPAID'
+          OR latest_quote_observed_at IS DISTINCT FROM NEW.evidence_at
+          OR latest_quote_id IS DISTINCT FROM effect_record.operator_reference
+          OR latest_quote_expiry IS DISTINCT FROM effect_record.operator_reference_expires_at
+          OR latest_proof_fingerprint IS DISTINCT FROM NEW.proof_state_snapshot_fingerprint
+          OR latest_proof_observed_at < NEW.evidence_at
+          OR latest_proof_observed_at > NEW.recorded_at
+        THEN
+          RAISE EXCEPTION 'Cashu melt release requires the latest failure evidence pair'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_proof_reservation_events_latest_melt_release
+        BEFORE INSERT ON cashu_proof_reservation_events
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_latest_melt_release_evidence();
+    `,
+    version: 12,
+  }),
 ]);
 
 export async function applyPostgresMigrations(

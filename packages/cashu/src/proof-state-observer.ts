@@ -47,7 +47,7 @@ export class CashuProofStateObservationError extends Error {
 
 export class CashuProofStateObserver {
   private readonly clock: () => number;
-  private readonly mintUrl: string;
+  readonly mintUrl: string;
 
   constructor(
     private readonly source: CashuMintProofStateSource,

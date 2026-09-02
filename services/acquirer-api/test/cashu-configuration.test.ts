@@ -10,7 +10,10 @@ import { describe, expect, it } from "vitest";
 import {
   CashuConfigurationError,
   cashuPaymentRequestIssuerFromEnvironment,
+  cashuStellarSettlementDestinationFromEnvironment,
 } from "../src/cashu-configuration";
+
+const SETTLEMENT_DESTINATION = "GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4";
 
 const INVOICE = createInvoiceV1({
   amount: minorUnits(1_234),
@@ -72,6 +75,34 @@ describe("Cashu payment request configuration", () => {
         }),
       ),
     ).toBeInstanceOf(CashuConfigurationError);
+  });
+
+  it("loads a server-owned Stellar settlement destination", () => {
+    expect(String(cashuStellarSettlementDestinationFromEnvironment({}))).toBe(
+      SETTLEMENT_DESTINATION,
+    );
+    expect(
+      String(
+        cashuStellarSettlementDestinationFromEnvironment({
+          CASHMESH_STELLAR_SETTLEMENT_DESTINATION: SETTLEMENT_DESTINATION,
+          NODE_ENV: "production",
+        }),
+      ),
+    ).toBe(SETTLEMENT_DESTINATION);
+  });
+
+  it("requires a valid production Stellar settlement destination without reflecting it", () => {
+    expect(
+      errorFrom(() => cashuStellarSettlementDestinationFromEnvironment({ NODE_ENV: "production" })),
+    ).toBeInstanceOf(CashuConfigurationError);
+    const error = errorFrom(() =>
+      cashuStellarSettlementDestinationFromEnvironment({
+        CASHMESH_STELLAR_SETTLEMENT_DESTINATION: "secret-invalid-destination",
+        NODE_ENV: "production",
+      }),
+    );
+    expect(error).toBeInstanceOf(CashuConfigurationError);
+    expect(String(error)).not.toContain("secret-invalid-destination");
   });
 
   it.each([

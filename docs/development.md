@@ -64,12 +64,14 @@ transport. Override them with the compact JSON array and HTTPS URL shown in `.en
 ```bash
 export CASHMESH_CASHU_OPERATOR_ROUTES='[{"operatorId":"operator-a","mintUrl":"https://mint-a.example","tier":"trusted"}]'
 export CASHMESH_CASHU_TRANSPORT_URL=https://pay.example/v1/cashu/payments
+export CASHMESH_STELLAR_SETTLEMENT_DESTINATION=GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4
 ```
 
-`NODE_ENV=production` requires both values and rejects malformed, duplicate, unlisted, non-HTTPS, or
-oversized profiles before opening the database. The API implements the POST path only as a bounded,
-non-retaining envelope check and always rejects unverified proofs; the local request is not a payable
-checkout.
+`NODE_ENV=production` requires all three values and rejects malformed, duplicate, unlisted, non-HTTPS,
+oversized, or checksum-invalid configuration before opening the database. The destination must be a
+server-controlled Stellar account or muxed account; configuring its syntax does not prove operational
+control. The API implements the POST path only as a bounded, non-retaining envelope check and always
+rejects unverified proofs; the local request is not a payable checkout.
 
 The Compose service uses local-only test credentials from `.env.example`. Stop the container without
 deleting its named data volume with:
@@ -108,8 +110,8 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 |---|---|---|
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
 | Cashu adapter | `pnpm --filter @cashmesh/cashu test` | NUT-18 mapping, bounded keyset/proof/quote/melt clients, official DLEQ validation, exact fees, dispatch authorization, and redacted bearer bundles |
-| Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, runtime Cashu configuration, replay, envelope binding, privacy, melt coordination, and sanitized failures |
-| PostgreSQL repository integration | `pnpm test:integration` | Migration, invoice/request atomicity, Cashu evidence, reservation lifecycle, encrypted custody, Stellar quote ownership, fresh melt authorization, atomic paid-melt accounting, ambiguity retention, restart, concurrency, corruption, and rollback behavior |
+| Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, runtime Cashu and Stellar destination configuration, replay, envelope binding, privacy, melt dispatch and recovery coordination, and sanitized failures |
+| PostgreSQL repository integration | `pnpm test:integration` | Migration, invoice/request atomicity, Cashu evidence, reservation lifecycle, encrypted custody, Stellar destination and quote ownership, fresh melt authorization, no-redispatch recovery, atomic paid-melt accounting, ambiguity retention, restart, concurrency, corruption, and rollback behavior |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
 | NUT-18 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut18_interoperability` | Pinned CDK decodes the cashu-ts fixture with the intended fields |
 | NUT-05 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut05_interoperability` | The bounded TypeScript client and pinned CDK types accept the same Stellar quote fields |

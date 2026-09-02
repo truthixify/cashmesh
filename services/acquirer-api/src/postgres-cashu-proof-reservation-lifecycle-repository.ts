@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import {
   CASHU_PROOF_STATE_SNAPSHOT_SCHEMA_VERSION,
   type CashuProofStateValue,
+  type CashuStellarSettlementDestination,
+  cashuStellarMeltRequestDestination,
+  cashuStellarSettlementDestination,
   createCashuProofStateSnapshotV1,
   normalizeCashuMintUrl,
 } from "@cashmesh/cashu";
@@ -536,7 +539,7 @@ export class PostgresCashuProofReservationLifecycleRepository
             state: "released",
           };
         } else {
-          await this.assertEffectEvidence(
+          const effect = await this.assertEffectEvidence(
             client,
             reservation,
             validated.effectId,
@@ -550,6 +553,19 @@ export class PostgresCashuProofReservationLifecycleRepository
             validated.proofStateObservedAt,
             "UNSPENT",
           );
+          if (validated.evidenceKind === "melt_unpaid_after_expiry") {
+            if (effect.kind !== "melt") {
+              return failInvalidTransition();
+            }
+            await this.assertLatestMeltReleaseEvidence(
+              client,
+              reservation,
+              effect,
+              validated.evidenceAt,
+              validated.proofStateObservedAt,
+              proofStateFingerprint,
+            );
+          }
           draft = {
             effectId: validated.effectId,
             eventId: validated.eventId,
@@ -645,7 +661,7 @@ export class PostgresCashuProofReservationLifecycleRepository
       return failInvalidTransition();
     }
 
-    const settlementMode = await this.requireSettlementMode(client, reservation);
+    const settlementMode = (await this.requireSettlementRoute(client, reservation)).mode;
     if (settlementMode !== "immediate_conversion") {
       return failInvalidTransition();
     }
@@ -754,10 +770,13 @@ export class PostgresCashuProofReservationLifecycleRepository
     return accounting;
   }
 
-  private async requireSettlementMode(
+  private async requireSettlementRoute(
     client: PoolClient,
     reservation: ReservationScope,
-  ): Promise<SettlementMode> {
+  ): Promise<{
+    readonly destination: CashuStellarSettlementDestination;
+    readonly mode: SettlementMode;
+  }> {
     const requestResult = await client.query<InvoiceCashuRequestRow>(
       `
         SELECT
@@ -776,7 +795,7 @@ export class PostgresCashuProofReservationLifecycleRepository
     );
     const operatorResult = await client.query<InvoiceRouteRow>(
       `
-        SELECT position, operator_id, mint_url, mode, tier, reason
+        SELECT position, operator_id, mint_url, mode, tier, reason, settlement_destination
         FROM invoice_cashu_request_operators
         WHERE invoice_id = $1 AND merchant_id = $2
         ORDER BY position
@@ -804,7 +823,18 @@ export class PostgresCashuProofReservationLifecycleRepository
           candidate.operatorId === reservation.operatorId &&
           candidate.mintUrl === reservation.mintUrl,
       );
-      return route?.mode ?? failInvalidRecord();
+      const routeRow = operatorResult.rows.find(
+        (candidate) =>
+          candidate.operator_id === reservation.operatorId &&
+          candidate.mint_url === reservation.mintUrl,
+      );
+      if (route === undefined || routeRow === undefined) {
+        return failInvalidRecord();
+      }
+      return Object.freeze({
+        destination: cashuStellarSettlementDestination(routeRow.settlement_destination),
+        mode: route.mode,
+      });
     } catch {
       return failInvalidRecord();
     }
@@ -856,7 +886,7 @@ export class PostgresCashuProofReservationLifecycleRepository
     );
 
     try {
-      const settlementMode = await this.requireSettlementMode(client, reservation);
+      const settlementMode = (await this.requireSettlementRoute(client, reservation)).mode;
       const assetAccount = mapStoredAssetAccount(row);
       const accounting = acceptInvoicePaymentV1(
         createInvoiceV1({
@@ -941,7 +971,7 @@ export class PostgresCashuProofReservationLifecycleRepository
     evidenceKind: string,
     evidenceAt: UnixTimestamp,
     recordedAt: UnixTimestamp,
-  ): Promise<void> {
+  ): Promise<CashuOperatorEffectV1> {
     const effect = (await this.loadLifecycle(client, reservation)).effect;
     if (
       effect === undefined ||
@@ -958,6 +988,59 @@ export class PostgresCashuProofReservationLifecycleRepository
         return failInvalidTransition();
       }
       await this.assertMeltPaidEvidence(client, reservation, effect, evidenceAt);
+    }
+    return effect;
+  }
+
+  private async assertLatestMeltReleaseEvidence(
+    client: PoolClient,
+    reservation: ReservationScope,
+    effect: Extract<CashuOperatorEffectV1, { readonly kind: "melt" }>,
+    evidenceAt: UnixTimestamp,
+    proofStateObservedAt: UnixTimestamp,
+    proofStateFingerprint: string,
+  ): Promise<void> {
+    const evidence = await this.loadMeltQuotedEvidence(client, reservation.paymentId, true);
+    const latestQuote = evidence?.observations.at(-1);
+    const settlementRoute = await this.requireSettlementRoute(client, reservation);
+    if (
+      evidence === undefined ||
+      latestQuote === undefined ||
+      !meltQuoteAttemptMatchesReservation(evidence.attempt, reservation) ||
+      evidence.attempt.mintUrl !== reservation.mintUrl ||
+      cashuStellarMeltRequestDestination(evidence.attempt.request) !==
+        settlementRoute.destination ||
+      cashuOperatorReference(latestQuote.quoteId) !== effect.operatorReference ||
+      latestQuote.expiry !== effect.operatorReferenceExpiresAt ||
+      latestQuote.observedAt !== evidenceAt ||
+      latestQuote.state !== "UNPAID"
+    ) {
+      return failInvalidTransition();
+    }
+
+    const latestProofState = await client.query<{
+      observed_at: string;
+      snapshot_fingerprint: string;
+    }>(
+      `
+        SELECT snapshot_fingerprint, observed_at
+        FROM cashu_proof_state_observations
+        WHERE payment_id = $1
+        ORDER BY observed_at DESC
+        LIMIT 1
+      `,
+      [reservation.paymentId],
+    );
+    const latestProof = latestProofState.rows[0];
+    if (
+      latestProof === undefined ||
+      latestProof.snapshot_fingerprint !== proofStateFingerprint ||
+      parseSafeInteger(latestProof.observed_at) !== proofStateObservedAt
+    ) {
+      throw new CashuProofReservationLifecycleRepositoryError(
+        "proof_state_evidence_missing",
+        "Cashu melt release requires the latest all-UNSPENT proof-state evidence.",
+      );
     }
   }
 
@@ -1562,9 +1645,12 @@ export class PostgresCashuProofReservationLifecycleRepository
       .filter((observation) => observation.observedAt <= effect.startedAt)
       .at(-1);
     const latestQuote = evidence.observations.at(-1);
+    const settlementRoute = await this.requireSettlementRoute(client, reservation);
     const immutableTermsMatch =
       meltQuoteAttemptMatchesReservation(evidence.attempt, reservation) &&
       evidence.attempt.mintUrl === reservation.mintUrl &&
+      cashuStellarMeltRequestDestination(evidence.attempt.request) ===
+        settlementRoute.destination &&
       dispatchQuote !== undefined &&
       cashuOperatorReference(dispatchQuote.quoteId) === effect.operatorReference &&
       dispatchQuote.expiry === effect.operatorReferenceExpiresAt &&
@@ -1602,6 +1688,7 @@ export class PostgresCashuProofReservationLifecycleRepository
           amount,
           request,
           schema_version,
+          settlement_destination,
           started_at
         FROM cashu_stellar_melt_quote_attempts AS attempt
         WHERE attempt.payment_id = $1

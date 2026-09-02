@@ -503,6 +503,7 @@ function invoiceRecord(requestedInvoiceId: string, amount: number): CreateOpenIn
     idempotencyKey: idempotencyKey(`checkout-${requestedInvoiceId}`),
     invoice,
     requestFingerprint: createFingerprint(requestedInvoiceId),
+    settlementDestination: "GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4",
   };
 }
 

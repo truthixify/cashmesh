@@ -42,6 +42,7 @@ export interface BuildAppOptions {
   readonly invoiceIdFactory?: () => string;
   readonly invoiceRepository: InvoiceRepository;
   readonly logger?: FastifyServerOptions["logger"];
+  readonly stellarSettlementDestination: string;
 }
 
 export function buildApp(options: BuildAppOptions): FastifyInstance {
@@ -56,6 +57,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     {
       ...(options.clock !== undefined && { clock: options.clock }),
       ...(options.invoiceIdFactory !== undefined && { invoiceIdFactory: options.invoiceIdFactory }),
+      settlementDestination: options.stellarSettlementDestination,
     },
   );
   const paymentIntakeService = new PaymentIntakeService(options.invoiceRepository, {

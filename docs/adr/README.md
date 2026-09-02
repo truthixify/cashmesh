@@ -30,3 +30,4 @@ Current decisions:
 - [ADR-0021: Authorize Bounded Zero-Fee Stellar Melt Dispatch](0021-authorize-zero-fee-stellar-melt-dispatch.md)
 - [ADR-0022: Coordinate One Fresh Stellar Melt Dispatch](0022-coordinate-fresh-stellar-melt-dispatch.md)
 - [ADR-0023: Atomically Account Confirmed Stellar Melt Payments](0023-atomically-account-stellar-melt-payments.md)
+- [ADR-0024: Bind Stellar Destinations and Recover Melts Without Redispatch](0024-bind-stellar-destinations-and-recover-melts.md)

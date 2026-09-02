@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import {
   type AcceptedOperatorRouteV1,
   type CashuPaymentRequestV1,
+  type CashuStellarSettlementDestination,
+  cashuStellarSettlementDestination,
   createCashuPaymentRequestV1,
 } from "@cashmesh/cashu";
 import {
@@ -62,6 +64,7 @@ export interface StoredCashuOperatorRouteRow {
   readonly operator_id: string;
   readonly position: number;
   readonly reason: string;
+  readonly settlement_destination: string;
   readonly tier: string;
 }
 
@@ -165,6 +168,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         input.invoice,
         input.cashuPaymentRequest,
       );
+      const settlementDestination = validateSettlementDestination(input.settlementDestination);
       return await this.withTransaction(async (client) => {
         const reservation = await client.query<ReservationRow>(
           `
@@ -217,7 +221,12 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
             input.invoice.state,
           ],
         );
-        await this.insertCashuPaymentRequest(client, input.invoice, cashuPaymentRequest);
+        await this.insertCashuPaymentRequest(
+          client,
+          input.invoice,
+          cashuPaymentRequest,
+          settlementDestination,
+        );
         return Object.freeze({
           cashuPaymentRequest,
           invoice: input.invoice,
@@ -300,6 +309,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     client: PoolClient,
     invoice: OpenInvoiceV1,
     request: CashuPaymentRequestV1,
+    settlementDestination: CashuStellarSettlementDestination,
   ): Promise<void> {
     await client.query(
       `
@@ -326,7 +336,11 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         request.issuedAt,
         request.mintPolicy,
         request.operators.length,
-        createCashuPaymentRequestRouteSetFingerprint(invoice.merchantId, request),
+        createCashuPaymentRequestRouteSetFingerprint(
+          invoice.merchantId,
+          request,
+          settlementDestination,
+        ),
         request.transportUrl,
       ],
     );
@@ -342,9 +356,10 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
             mint_url,
             mode,
             tier,
-            reason
+            reason,
+            settlement_destination
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         `,
         [
           invoice.id,
@@ -355,6 +370,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           route.mode,
           route.tier,
           route.reason,
+          settlementDestination,
         ],
       );
     }
@@ -425,7 +441,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     const invoice = mapInvoiceRow(row);
     const operators = await client.query<CashuOperatorRow>(
       `
-        SELECT position, operator_id, mint_url, mode, tier, reason
+        SELECT position, operator_id, mint_url, mode, tier, reason, settlement_destination
         FROM invoice_cashu_request_operators
         WHERE invoice_id = $1
         ORDER BY position
@@ -510,6 +526,14 @@ export function reconstructStoredCashuPaymentRequest(
     if (issuedAt !== invoice.createdAt) {
       return failInvalidCashuRecord();
     }
+    const settlementDestination = cashuStellarSettlementDestination(
+      operatorRows[0]?.settlement_destination ?? "",
+    );
+    if (
+      !operatorRows.every((operator) => operator.settlement_destination === settlementDestination)
+    ) {
+      return failInvalidCashuRecord();
+    }
     const configuredRoutes = operatorRows.map((operator, position) => {
       if (
         operator.position !== position ||
@@ -536,7 +560,11 @@ export function reconstructStoredCashuPaymentRequest(
       reconstructed.encodedRequest !== row.encoded_request ||
       reconstructed.transportUrl !== row.transport_url ||
       row.route_set_fingerprint !==
-        createCashuPaymentRequestRouteSetFingerprint(invoice.merchantId, reconstructed) ||
+        createCashuPaymentRequestRouteSetFingerprint(
+          invoice.merchantId,
+          reconstructed,
+          settlementDestination,
+        ) ||
       !operatorRows.every((operator, position) =>
         sameOperatorRoute(operator, reconstructed.operators[position]),
       )
@@ -555,6 +583,7 @@ export function reconstructStoredCashuPaymentRequest(
 export function createCashuPaymentRequestRouteSetFingerprint(
   ownerId: MerchantId,
   request: CashuPaymentRequestV1,
+  settlementDestination: CashuStellarSettlementDestination,
 ): string {
   return createHash("sha256")
     .update(
@@ -573,6 +602,7 @@ export function createCashuPaymentRequestRouteSetFingerprint(
           operatorId: route.operatorId,
           position,
           reason: route.reason,
+          settlementDestination,
           tier: route.tier,
         })),
         schemaVersion: request.schemaVersion,
@@ -661,6 +691,14 @@ function sameAcceptedRoute(
     left.reason === right.reason &&
     left.tier === right.tier
   );
+}
+
+function validateSettlementDestination(value: string): CashuStellarSettlementDestination {
+  try {
+    return cashuStellarSettlementDestination(value);
+  } catch {
+    return failInvalidCashuRecord();
+  }
 }
 
 function isOperatorTier(value: string): value is Exclude<OperatorTier, "unlisted"> {

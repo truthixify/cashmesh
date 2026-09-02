@@ -199,6 +199,7 @@ export class PostgresCashuProofStateRepository implements CashuProofStateReposit
           return Object.freeze({ replayed: true, snapshot });
         }
 
+        await this.assertObservationWritable(client, observation.paymentId);
         await this.assertProposedTransition(client, observation);
         await client.query(
           `
@@ -529,6 +530,28 @@ export class PostgresCashuProofStateRepository implements CashuProofStateReposit
       throw new CashuProofStateRepositoryError(
         "spent_state_regression",
         "Cashu proof state cannot regress after SPENT evidence.",
+      );
+    }
+  }
+
+  private async assertObservationWritable(
+    client: PoolClient,
+    requestedPaymentId: PaymentId,
+  ): Promise<void> {
+    const result = await client.query<{ state: string }>(
+      `
+        SELECT state
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = $1
+        ORDER BY sequence DESC
+        LIMIT 1
+      `,
+      [requestedPaymentId],
+    );
+    if (["consumed", "released"].includes(result.rows[0]?.state ?? "")) {
+      throw new CashuProofStateRepositoryError(
+        "reservation_terminal",
+        "Cashu proof-state observations cannot extend a terminal reservation.",
       );
     }
   }

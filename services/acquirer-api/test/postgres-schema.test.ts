@@ -68,7 +68,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
     });
   });
 
-  it("migrates an empty v9 schema with required authenticated route fields", async () => {
+  it("migrates an empty v9 schema with required authenticated route and destination fields", async () => {
     await withTemporarySchema(async (client) => {
       await migrate(client, 9);
       await migrate(client);
@@ -76,6 +76,8 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
       const state = await client.query<{
         latest_version: number;
         operator_count_nullable: string;
+        operator_destination_nullable: string;
+        quote_destination_nullable: string;
         route_fingerprint_nullable: string;
       }>(
         `
@@ -88,14 +90,54 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL schema migrations", () =
             (SELECT is_nullable FROM information_schema.columns
               WHERE table_schema = current_schema()
                 AND table_name = 'invoice_cashu_requests'
-                AND column_name = 'route_set_fingerprint') AS route_fingerprint_nullable
+                AND column_name = 'route_set_fingerprint') AS route_fingerprint_nullable,
+            (SELECT is_nullable FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'invoice_cashu_request_operators'
+                AND column_name = 'settlement_destination') AS operator_destination_nullable,
+            (SELECT is_nullable FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'cashu_stellar_melt_quote_attempts'
+                AND column_name = 'settlement_destination') AS quote_destination_nullable
         `,
       );
       expect(state.rows[0]).toEqual({
-        latest_version: 10,
+        latest_version: 12,
         operator_count_nullable: "NO",
+        operator_destination_nullable: "NO",
+        quote_destination_nullable: "NO",
         route_fingerprint_nullable: "NO",
       });
+    });
+  });
+
+  it("refuses v10 issued routes without a server-authorized settlement destination", async () => {
+    await withTemporarySchema(async (client) => {
+      await migrate(client, 10);
+      await seedV10IssuedRequest(client);
+
+      await client.query("BEGIN");
+      const error = await errorFromAsync(() => applyPostgresMigrations(client));
+      expect(error).toMatchObject({ code: "23514" });
+      await client.query("ROLLBACK");
+
+      const state = await client.query<{
+        has_settlement_destination: boolean;
+        latest_version: number;
+      }>(
+        `
+          SELECT
+            (SELECT MAX(version) FROM cashmesh_schema_migrations) AS latest_version,
+            EXISTS (
+              SELECT 1
+              FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'invoice_cashu_request_operators'
+                AND column_name = 'settlement_destination'
+            ) AS has_settlement_destination
+        `,
+      );
+      expect(state.rows[0]).toEqual({ has_settlement_destination: false, latest_version: 10 });
     });
   });
 
@@ -290,6 +332,58 @@ async function seedIssuedRequest(client: PoolClient): Promise<void> {
   try {
     await insertLegacyInvoice(client);
     await insertLegacyRequest(client);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+}
+
+async function seedV10IssuedRequest(client: PoolClient): Promise<void> {
+  await client.query("BEGIN");
+  try {
+    await insertLegacyInvoice(client);
+    await client.query(`
+      INSERT INTO invoice_cashu_requests (
+        invoice_id,
+        merchant_id,
+        schema_version,
+        encoded_request,
+        encoding,
+        issued_at,
+        mint_policy,
+        operator_count,
+        route_set_fingerprint,
+        transport_url
+      )
+      VALUES (
+        'invoice-legacy',
+        'merchant-legacy',
+        1,
+        'creqAabc',
+        'creqA',
+        100,
+        'strict',
+        1,
+        repeat('a', 64),
+        'https://pay.cashmesh.example/v1/cashu/payments'
+      )
+    `);
+    await client.query(`
+      INSERT INTO invoice_cashu_request_operators (
+        invoice_id, merchant_id, position, operator_id, mint_url, mode, tier, reason
+      )
+      VALUES (
+        'invoice-legacy',
+        'merchant-legacy',
+        0,
+        'operator-legacy',
+        'https://mint-legacy.example',
+        'immediate_conversion',
+        'trusted',
+        'trusted_operator'
+      )
+    `);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

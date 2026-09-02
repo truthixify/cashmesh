@@ -1,4 +1,9 @@
-import { type CashuOperatorRoute, CashuPaymentRequestIssuer } from "@cashmesh/cashu";
+import {
+  type CashuOperatorRoute,
+  CashuPaymentRequestIssuer,
+  type CashuStellarSettlementDestination,
+  cashuStellarSettlementDestination,
+} from "@cashmesh/cashu";
 import {
   OPERATOR_TIERS,
   type OperatorTier,
@@ -8,6 +13,8 @@ import {
 } from "@cashmesh/domain";
 
 const LOCAL_TRANSPORT_URL = "https://pay.cashmesh.example/v1/cashu/payments";
+const LOCAL_STELLAR_SETTLEMENT_DESTINATION =
+  "GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4";
 const LOCAL_OPERATOR_ROUTES: readonly CashuOperatorRoute[] = Object.freeze([
   Object.freeze({
     mintUrl: "https://mint-a.cashmesh.example",
@@ -53,6 +60,23 @@ export function cashuPaymentRequestIssuerFromEnvironment(
       return failConfiguration();
     }
     return new CashuPaymentRequestIssuer({ operators, transportUrl });
+  } catch {
+    throw new CashuConfigurationError();
+  }
+}
+
+export function cashuStellarSettlementDestinationFromEnvironment(
+  environment: Environment,
+): CashuStellarSettlementDestination {
+  try {
+    const value = readValue(
+      environment.CASHMESH_STELLAR_SETTLEMENT_DESTINATION,
+      environment.NODE_ENV === "production" ? undefined : LOCAL_STELLAR_SETTLEMENT_DESTINATION,
+    );
+    if (value === undefined) {
+      return failConfiguration();
+    }
+    return cashuStellarSettlementDestination(value);
   } catch {
     throw new CashuConfigurationError();
   }

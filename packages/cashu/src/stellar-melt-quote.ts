@@ -42,9 +42,14 @@ const ALLOWED_SEP7_PARAMETERS = new Set([
 const ALLOWED_MEMO_TYPES = new Set(["MEMO_HASH", "MEMO_ID", "MEMO_RETURN", "MEMO_TEXT"]);
 
 declare const cashuStellarMeltQuoteIdBrand: unique symbol;
+declare const cashuStellarSettlementDestinationBrand: unique symbol;
 
 export type CashuStellarMeltQuoteId = string & {
   readonly [cashuStellarMeltQuoteIdBrand]: true;
+};
+
+export type CashuStellarSettlementDestination = string & {
+  readonly [cashuStellarSettlementDestinationBrand]: true;
 };
 
 export type CashuStellarMeltQuoteState = "PAID" | "PENDING" | "UNPAID";
@@ -119,6 +124,25 @@ export function cashuStellarMeltQuoteId(value: string): CashuStellarMeltQuoteId 
     );
   }
   return value as CashuStellarMeltQuoteId;
+}
+
+export function cashuStellarSettlementDestination(
+  value: string,
+): CashuStellarSettlementDestination {
+  if (typeof value !== "string" || !isValidStellarDestination(value)) {
+    throw invalidRequest();
+  }
+  return value as CashuStellarSettlementDestination;
+}
+
+export function cashuStellarMeltRequestDestination(
+  input: CashuStellarMeltQuoteRequestV1,
+): CashuStellarSettlementDestination {
+  const request = createCashuStellarMeltQuoteRequestV1(input);
+  const url = new URL(request.request);
+  return cashuStellarSettlementDestination(
+    requiredParameter(new Map(url.searchParams), "destination"),
+  );
 }
 
 export function createCashuStellarMeltQuoteRequestV1(

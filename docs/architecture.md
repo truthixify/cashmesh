@@ -72,6 +72,11 @@ quote evidence. An internal acquirer coordinator selects the executor by the res
 derives input fees from its exact historical keyset snapshot, scopes custody decryption to the call,
 and authorizes the client only after a fresh effect insert. It records returned quote state plus
 `pending` or conservative attention without retrying or claiming proof consumption.
+A separate recovery coordinator has no custody or executor dependency. It checks only the bound quote
+and exact NUT-07 proof set, persists both observations, and accepts or releases only from the paired
+terminal evidence; every uncertain pair retains claims for attention. Release revalidates that the
+failure pair is still latest while holding the reservation lock, and terminal state freezes later
+quote and proof observations.
 A separate atomic repository operation can accept only the current immediate-conversion Stellar
 profile after matching persisted `PAID` and exact all-`SPENT` evidence. It derives the canonical
 testnet USDC asset account and commits invoice, journal, consumed event, and custody deletion together.
@@ -105,8 +110,8 @@ connect those records to one bounded zero-fee melt call for the reservation's co
 persists pending or ambiguous outcomes across restart. Confirmed immediate-conversion melts can be
 accounted internally in one transaction, but successful swaps remain blocked without replacement-proof
 custody. These capabilities are not wired into the payment endpoint. Production key management,
-protected-mint authentication, proof-validation orchestration, destination authorization, recovery
-observation, and public terminal invoice flows are not yet implemented.
+protected-mint authentication, proof-validation orchestration, recovery scheduling, and public
+terminal invoice flows are not yet implemented.
 
 ### Merchant Console
 
@@ -245,13 +250,19 @@ The custody repository stores only authenticated ciphertext and metadata, binds 
 reservation, rejects key/nonce reuse across terminal histories, and exposes plaintext only through a
 self-destroying callback. Its local AES adapter uses a key-provider port; no production KMS or HSM
 adapter exists. The quote repository requires that custody and the active reservation before it grants
-one creation authorization, binds one quote identity per mint, retains ambiguous creation, and prevents
-state regression after `PAID`. The lifecycle repository and a database trigger require every new melt
-effect to match that payment's mint, quote ID, expiry, and dispatch-time `UNPAID` observation.
+one creation authorization, binds the SEP-0007 destination to the server-owned immediate-conversion
+route, binds one quote identity per mint, retains ambiguous creation, and prevents state regression
+after `PAID`. The lifecycle repository and a database trigger require every new melt effect to match
+that payment's mint, quote ID, expiry, and dispatch-time `UNPAID` observation.
 Historical reads retain that binding while permitting later `PENDING` or `PAID` observations.
 The internal coordinator derives the fee from the exact historical keyset evidence, chooses a
 mint-specific executor, authorizes only a non-replayed effect, and records a returned quote observation
 or attention while leaving all proof claims active.
+The recovery coordinator cannot access custody or execution. It checks the existing quote and exact
+reservation proof set, persists both observations, and keeps claims active unless their paired evidence
+proves either paid-and-spent acceptance or expired-unpaid-and-unspent release. The release transaction
+requires that failure pair to remain the latest durable evidence, while database-serialized observation
+writes cannot extend a terminal reservation.
 The acceptance operation requires the exact persisted `PAID` observation and later all-`SPENT`
 snapshot, reconstructs and authenticates the full quote attempt and issued route set, then atomically
 stores the paid invoice, canonical Stellar USDC journal, consumed event, and custody deletion. Deferred
@@ -259,6 +270,8 @@ constraints repeat that complete relationship, while issued route and accounting
 The accounting migration locks issuance and payment tables in application write order and refuses
 consumed or active legacy payments plus every pre-fingerprint issued request. Retirement or reviewed
 backfill is required before upgrade; migration does not silently leave legacy invoices unreadable.
+The destination migration likewise refuses every existing issued request because historical server
+ownership cannot be inferred safely.
 Repositories reconstruct stored records through validated adapters before return. See the
 [merchant invoice API](invoice-api.md) for request and replay semantics.
 
@@ -313,3 +326,4 @@ justify it.
 - [ADR-0021: Authorize bounded zero-fee Stellar melt dispatch](adr/0021-authorize-zero-fee-stellar-melt-dispatch.md)
 - [ADR-0022: Coordinate one fresh Stellar melt dispatch](adr/0022-coordinate-fresh-stellar-melt-dispatch.md)
 - [ADR-0023: Atomically account confirmed Stellar melt payments](adr/0023-atomically-account-stellar-melt-payments.md)
+- [ADR-0024: Bind Stellar destinations and recover melts without redispatch](adr/0024-bind-stellar-destinations-and-recover-melts.md)

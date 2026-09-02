@@ -42,10 +42,13 @@ request issue time, transport URL, selected settlement mode, operator tier, and 
 acquirer persists that record, the encoded request, and every accepted route in the same transaction
 as the invoice and idempotency reservation.
 
-The server validates one reusable route profile at startup. Production requires
-`CASHMESH_CASHU_OPERATOR_ROUTES` as a JSON array and `CASHMESH_CASHU_TRANSPORT_URL` as an HTTPS URL.
-HTTP callers cannot submit mint URLs, operator tiers, settlement modes, or transports. The local
-defaults use the reserved `.example` domain and are fixtures that cannot receive a payment.
+The server validates one reusable route profile and Stellar settlement destination at startup.
+Production requires `CASHMESH_CASHU_OPERATOR_ROUTES` as a JSON array,
+`CASHMESH_CASHU_TRANSPORT_URL` as an HTTPS URL, and
+`CASHMESH_STELLAR_SETTLEMENT_DESTINATION` as a checksum-valid account or muxed account. HTTP callers
+cannot submit mint URLs, operator tiers, settlement modes, transports, or destinations. The local
+operator defaults use the reserved `.example` domain and are fixtures that cannot receive a Cashu
+payment.
 
 ## Strict Operator Semantics
 
@@ -212,10 +215,11 @@ and witness-free; it does not interpret a snapshot as payment by itself.
 ## Stellar Melt Quote Evidence
 
 The acquirer can persist one custom `stellar` melt quote attempt for an already reserved payment. The
-attempt derives the invoice, operator, mint, and `usdc` unit from the reservation, requires encrypted
-bearer custody and no started effect, and requires the exact SEP-0007 cent amount to equal the open
-invoice. Its first successful insert is the only creation authorization. Exact concurrent or restarted
-calls replay current state and must not issue another POST.
+attempt derives the invoice, operator, mint, `usdc` unit, settlement mode, and server-owned destination
+from the reservation's issued route. It requires encrypted bearer custody and no started effect, and
+requires the exact SEP-0007 cent amount and destination to equal the open invoice route. Its first
+successful insert is the only creation authorization. Exact concurrent or restarted calls replay
+current state and must not issue another POST.
 
 One immutable outcome records either `transport_ambiguous` with no quote identity or the complete
 initial `UNPAID` quote. Ambiguity cannot be overwritten by a later quote or used as automatic retry
@@ -228,6 +232,10 @@ correlation metadata and must not enter telemetry or merchant-facing responses. 
 not contact a mint, inspect custody plaintext, dispatch proofs, enforce fee caps, change reservation
 state, or establish merchant payment. The lifecycle repository and PostgreSQL require every new melt
 effect to match this payment's mint, quote ID, expiry, and dispatch-time `UNPAID` evidence.
+
+The destination is included in both the issued route-set fingerprint and quote-attempt fingerprint.
+PostgreSQL also requires the quote attempt to reference that exact route and rejects any attempt whose
+route is not `immediate_conversion`.
 
 ## Stellar Melt Execution Adapter
 
@@ -271,6 +279,21 @@ failure after authorization records `needs_attention` and retains the active cla
 If lifecycle storage is unavailable, the effect remains recovery-only even though attention cannot be
 recorded immediately. This coordinator is not exposed by the payment endpoint.
 
+## Melt Recovery Coordinator
+
+The separate internal recovery coordinator cannot decrypt custody or call melt execution. For a
+payment with an existing melt effect, it checks only the bound NUT-05 quote, queries NUT-07 for the
+reservation's exact ordered proof references, and persists the exact returned snapshots before acting.
+Clients are registered and selected by normalized mint URL; a request caller cannot select another
+operator.
+
+`PAID` plus a later exact all-`SPENT` snapshot calls atomic payment acceptance with deterministic event
+and journal identifiers. `UNPAID` observed at or after quote expiry plus a later exact all-`UNSPENT`
+snapshot releases the reservation. `PENDING`, pre-expiry `UNPAID`, mixed proof state, transport or
+response failure, and contradictory evidence remain pending or enter attention while claims stay
+active. A terminal lifecycle returns before either operator read, so exact replay performs no network
+request and cannot redispatch proofs.
+
 ## Proof-Reservation Lifecycle
 
 The acquirer can persist one exact operator effect intent for a reserved payment. A swap or melt effect
@@ -303,15 +326,18 @@ coordinator connects a fresh, non-replayed insertion to the execution client's a
 
 This lifecycle boundary stores sanitized effect evidence, not a trusted receipt. The fresh-dispatch
 coordinator uses it to authorize one NUT-05 request and record pending or attention outcomes, but does
-not authenticate a protected mint, send NUT-03, observe NUT-07 recovery state, invoke atomic
-acceptance, or change the public endpoint's rejection. The separate acceptance operation derives the
-pinned Stellar testnet USDC account and commits a confirmed melt's paid invoice, balanced journal,
-consumed event, and custody deletion in one transaction.
+not authenticate a protected mint, send NUT-03, or change the public endpoint's rejection. The
+observation-only recovery coordinator can invoke atomic acceptance or evidence-gated release but has no
+custody or execution authority. The acceptance operation derives the pinned Stellar testnet USDC
+account and commits a confirmed melt's paid invoice, balanced journal, consumed event, and custody
+deletion in one transaction.
 
 The accounting migration takes access-exclusive locks in application write order and refuses legacy
 consumed history, any reservation not already proven released, and every request issued before route
 fingerprints. Accounting and route policy cannot be inferred safely, so those records require
 retirement or an explicitly reviewed backfill before upgrade can complete.
+The destination migration separately refuses every existing issued request because it cannot infer
+whether a historical SEP-0007 address was server-authorized.
 
 ## Encrypted Bearer-Proof Custody
 
@@ -361,14 +387,16 @@ and proof-state observer tests cover stable metadata, exact request/response bin
 concurrency, response bounds, transport timeouts, and failure paths entirely through local fixtures.
 Melt execution and coordinator tests cover the exact proof body, canonical fingerprint, historical
 fee derivation, fresh-effect authorization, redaction, expiry, amount binding, cancellation, transport
-bounds, response clocks, operator routing, pending, attention, and single-attempt failures through
-mocked HTTP only.
+bounds, response clocks, operator routing, pending, attention, paired recovery classification, and
+single-attempt failures through mocked HTTP only.
 PostgreSQL tests cover restart, historical collision rejection, freshness bounds, exact keyset and
 proof-state binding, terminal state history, concurrent replay, proof-reference exclusion, append-only
 enforcement, reservation lifecycle recovery, dispatch ownership, ambiguity retention, evidence-gated
 release, atomic paid-melt accounting, journal balance and position enforcement, encrypted custody
 restart and key rotation, key/nonce exclusion, ciphertext tamper detection, terminal deletion,
 rollback, stored-record corruption, and coordinator restart with encrypted custody.
+The restart path also proves that recovery can persist `PAID` and exact `SPENT` evidence, account the
+invoice, delete custody, and replay terminal state without a second melt call.
 They do not prove endpoint authenticity, an appropriate production freshness policy, mint honesty,
 running-mint compatibility, redemption, or merchant settlement. Do not present a locally issued fixture
 request as payable.

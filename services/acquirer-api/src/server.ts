@@ -1,5 +1,8 @@
 import { buildApp } from "./app";
-import { cashuPaymentRequestIssuerFromEnvironment } from "./cashu-configuration";
+import {
+  cashuPaymentRequestIssuerFromEnvironment,
+  cashuStellarSettlementDestinationFromEnvironment,
+} from "./cashu-configuration";
 import { PostgresInvoiceRepository } from "./postgres-invoice-repository";
 
 const LOCAL_DATABASE_URL = "postgresql://cashmesh:cashmesh_local@127.0.0.1:5432/cashmesh";
@@ -34,6 +37,9 @@ try {
 async function startServer(): Promise<void> {
   const port = readPort(process.env.ACQUIRER_PORT);
   const cashuPaymentRequestIssuer = cashuPaymentRequestIssuerFromEnvironment(process.env);
+  const stellarSettlementDestination = cashuStellarSettlementDestinationFromEnvironment(
+    process.env,
+  );
   const invoiceRepository = await PostgresInvoiceRepository.connect({
     connectionString: readDatabaseUrl(process.env.CASHMESH_DATABASE_URL),
     onBackgroundError: (error) => {
@@ -43,7 +49,12 @@ async function startServer(): Promise<void> {
   let app: ReturnType<typeof buildApp> | undefined;
 
   try {
-    app = buildApp({ cashuPaymentRequestIssuer, invoiceRepository, logger: true });
+    app = buildApp({
+      cashuPaymentRequestIssuer,
+      invoiceRepository,
+      logger: true,
+      stellarSettlementDestination,
+    });
     await app.listen({ host: process.env.ACQUIRER_HOST ?? "127.0.0.1", port });
   } catch (error) {
     try {

@@ -11,6 +11,7 @@ export interface CreateOpenInvoiceRecord {
   readonly idempotencyKey: IdempotencyKey;
   readonly invoice: OpenInvoiceV1;
   readonly requestFingerprint: string;
+  readonly settlementDestination: string;
 }
 
 export interface CreateOpenInvoiceResult extends IssuedInvoiceV1 {

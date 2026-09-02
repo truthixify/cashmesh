@@ -153,9 +153,11 @@ It does not assume NUT-19 response caching.
 
 Before the POST, the client validates the same permitted SEP-0007 parameter set, exact testnet network
 and USDC issuer, checksum-valid G- or M-address, 1 through 25,000 cent range, and exact integer-cent
-amount. It preserves the original URI for byte-for-byte response binding. The caller must still select
-the destination from server-owned merchant or settlement configuration; address validity alone is not
-payout authorization.
+amount. It preserves the original URI for byte-for-byte response binding. The acquirer loads one
+server-owned destination from configuration, persists it with every issued operator route, and includes
+it in the immutable route-set fingerprint. Quote creation extracts the SEP-0007 destination and accepts
+it only when it exactly matches the selected `immediate_conversion` route. Address validity alone is
+not payout authorization.
 
 A created quote must be `UNPAID`, unexpired, no more than 900 seconds from creation, and use a canonical
 UUIDv7. Its method, unit, request, amount, fee reserve, mint, and expiry are then immutable across
@@ -171,10 +173,11 @@ This quote state is not settlement evidence. The client does not store the quote
 execute a melt, interpret `PAID` as proof consumption, release a reservation, or write accounting.
 
 The acquirer repository separately persists one creation attempt before the POST. It derives invoice,
-operator, and mint ownership from an active reserved payment, requires existing encrypted custody, and
-requires the SEP-0007 amount to equal the invoice amount. Only a new `begin` result authorizes the one
-POST; exact replay returns recovery state without authorizing another call. The attempt then accepts one
-immutable transport-ambiguous or quoted outcome. An ambiguous outcome cannot be replaced automatically.
+operator, mint, settlement mode, and authorized destination from an active reserved payment, requires
+existing encrypted custody, and requires the SEP-0007 amount and destination to equal the invoice route.
+Only a new `begin` result authorizes the one POST; exact replay returns recovery state without
+authorizing another call. The attempt then accepts one immutable transport-ambiguous or quoted outcome.
+An ambiguous outcome cannot be replaced automatically.
 
 The quoted outcome owns one UUIDv7 per mint and starts with the validated `UNPAID` snapshot. Later
 observations append in completion-time order, bind every immutable term, permit `PENDING` to return to
@@ -187,6 +190,15 @@ UUIDv7 quote ID, expiry, and latest `UNPAID` observation no later than the effec
 validates the historical dispatch-time observation while allowing later `PENDING` or `PAID` history.
 The acquirer coordinator turns only a fresh effect insertion into scoped bearer decryption and one
 bounded outbound call. Replay is recovery-only and never authorizes another melt.
+
+The separate recovery coordinator has no executor or custody dependency. It checks only the existing
+quote and queries NUT-07 for the exact ordered reservation proof set, persists both responses, and then
+classifies the durable pair. `PAID` plus later all-`SPENT` accepts atomically; post-expiry `UNPAID` plus
+later all-`UNSPENT` releases; pending or pre-expiry evidence remains nonterminal; and every mixed,
+contradictory, or unavailable result retains claims in attention. Terminal replay returns before either
+operator read and deterministic terminal identifiers converge concurrent recovery. Release locks the
+reservation and revalidates that both failure snapshots are still latest. Quote and proof observation
+appends use that same lock and cannot extend a consumed or released reservation.
 
 ## Acquirer Melt Execution Boundary
 
@@ -214,11 +226,11 @@ quote history, `PENDING` also enters lifecycle pending, and every ambiguous or i
 outcome enters attention. Response observation time must fall between effect start and the
 coordinator's post-response clock.
 
-This remains an internal dispatch-capable boundary with no public payment-route wiring. It does not
-authenticate protected mints, inspect recovery-time NUT-07 state, delete custody, consume proofs,
-transition an invoice, or write the balanced journal. `UNPAID`, `PENDING`, and `PAID` are operator
-observations, and a failure after authorization cannot be retried automatically even when no valid
-response was returned.
+The dispatch and recovery coordinators remain internal with no public payment-route wiring. The
+dispatch coordinator never interprets `PAID` as acceptance. The recovery coordinator can reach the
+atomic acceptance or release operation only after paired persisted quote and proof-state evidence; the
+terminal transaction deletes custody. Neither coordinator authenticates protected mints or schedules
+background work, and a failure after authorization can never become permission to redispatch.
 
 ## Durable Journal Scope
 
@@ -249,6 +261,7 @@ Raw Horizon, CDK, filesystem, and signing details are not adopted as stable merc
 - origin-domain signing for SEP-0007 requests;
 - production database concurrency and encrypted envelope storage;
 - event-driven quote updates;
+- recovery scheduling, leases, and operational escalation;
 - a running `cdk-mintd` interoperability test for the acquirer quote or execution clients;
 - fees, late-payment return, or sub-cent recovery policy;
 - multiple operators sharing a clearing or settlement store; and

@@ -12,6 +12,8 @@ import {
   CashuStellarMeltQuoteClientError,
   CashuStellarMeltQuoteError,
   type CreateCashuStellarMeltQuoteInputV1,
+  cashuStellarMeltRequestDestination,
+  cashuStellarSettlementDestination,
   createCashuStellarMeltQuoteRequestV1,
   createCashuStellarMeltQuoteV1,
   MAX_CASHU_STELLAR_MELT_AMOUNT,
@@ -85,12 +87,15 @@ describe("Cashu Stellar melt quote model", () => {
   });
 
   it("accepts checksum-valid muxed destinations", () => {
-    expect(
-      createCashuStellarMeltQuoteRequestV1({
-        amount: AMOUNT,
-        request: paymentRequest({ destination: MUXED_DESTINATION }),
-      }).request,
-    ).toContain(MUXED_DESTINATION);
+    const request = createCashuStellarMeltQuoteRequestV1({
+      amount: AMOUNT,
+      request: paymentRequest({ destination: MUXED_DESTINATION }),
+    });
+
+    expect(request.request).toContain(MUXED_DESTINATION);
+    expect(cashuStellarMeltRequestDestination(request)).toBe(MUXED_DESTINATION);
+    expect(cashuStellarSettlementDestination(MUXED_DESTINATION)).toBe(MUXED_DESTINATION);
+    expect(() => cashuStellarSettlementDestination("GABC")).toThrow(CashuStellarMeltQuoteError);
   });
 
   it.each([

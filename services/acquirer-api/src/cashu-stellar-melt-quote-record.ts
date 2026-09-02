@@ -4,6 +4,9 @@ import {
   type CashuStellarMeltQuoteRequestV1,
   type CashuStellarMeltQuoteState,
   type CashuStellarMeltQuoteV1,
+  type CashuStellarSettlementDestination,
+  cashuStellarMeltRequestDestination,
+  cashuStellarSettlementDestination,
   createCashuStellarMeltQuoteRequestV1,
   createCashuStellarMeltQuoteV1,
   MAX_CASHU_STELLAR_MELT_QUOTE_TTL_SECONDS,
@@ -37,6 +40,7 @@ export interface CashuStellarMeltQuoteAttemptRecord {
   readonly payment_id: string;
   readonly request: string;
   readonly schema_version: number;
+  readonly settlement_destination: string;
   readonly started_at: string;
   readonly unit: string;
 }
@@ -75,6 +79,7 @@ export interface StoredCashuStellarMeltQuoteAttempt {
   readonly paymentId: PaymentId;
   readonly request: CashuStellarMeltQuoteRequestV1;
   readonly schemaVersion: typeof CASHU_STELLAR_MELT_QUOTE_ATTEMPT_SCHEMA_VERSION;
+  readonly settlementDestination: CashuStellarSettlementDestination;
   readonly startedAt: UnixTimestamp;
 }
 
@@ -99,6 +104,7 @@ export function mapCashuStellarMeltQuoteAttemptRecord(
     paymentId: paymentId(row.payment_id),
     request,
     schemaVersion: CASHU_STELLAR_MELT_QUOTE_ATTEMPT_SCHEMA_VERSION,
+    settlementDestination: cashuStellarSettlementDestination(row.settlement_destination),
     startedAt: unixTimestamp(parseSafeInteger(row.started_at)),
   };
   if (
@@ -106,6 +112,7 @@ export function mapCashuStellarMeltQuoteAttemptRecord(
     row.method !== request.method ||
     row.unit !== request.unit ||
     row.mint_url !== attempt.mintUrl ||
+    cashuStellarMeltRequestDestination(request) !== attempt.settlementDestination ||
     createCashuStellarMeltQuoteAttemptFingerprint(attempt) !== row.attempt_fingerprint
   ) {
     throw new Error("Stored Cashu Stellar melt quote attempt is invalid.");
@@ -128,6 +135,7 @@ export function createCashuStellarMeltQuoteAttemptFingerprint(
         paymentId: attempt.paymentId,
         request: attempt.request.request,
         schemaVersion: attempt.schemaVersion,
+        settlementDestination: attempt.settlementDestination,
         startedAt: attempt.startedAt,
         unit: attempt.request.unit,
       }),

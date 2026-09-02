@@ -9,6 +9,7 @@ import {
   CashuPaymentRequestIssuer,
   CashuStellarMeltExecutionClient,
   createCashuKeysetSnapshotV1,
+  createCashuProofStateSnapshotV1,
   createCashuStellarMeltQuoteV1,
   validateCashuPaymentProofsForCustodyV1,
 } from "@cashmesh/cashu";
@@ -35,11 +36,13 @@ import {
 } from "../src/cashu-proof-custody-cipher";
 import { CashuStellarMeltCoordinator } from "../src/cashu-stellar-melt-coordinator";
 import { cashuStellarMeltQuoteAttemptId } from "../src/cashu-stellar-melt-quote-repository";
+import { CashuStellarMeltRecoveryCoordinator } from "../src/cashu-stellar-melt-recovery-coordinator";
 import type { CreateOpenInvoiceRecord } from "../src/invoice-repository";
 import { PostgresCashuKeysetRepository } from "../src/postgres-cashu-keyset-repository";
 import { PostgresCashuProofCustodyRepository } from "../src/postgres-cashu-proof-custody-repository";
 import { PostgresCashuProofReservationLifecycleRepository } from "../src/postgres-cashu-proof-reservation-lifecycle-repository";
 import { PostgresCashuProofReservationRepository } from "../src/postgres-cashu-proof-reservation-repository";
+import { PostgresCashuProofStateRepository } from "../src/postgres-cashu-proof-state-repository";
 import { PostgresCashuStellarMeltQuoteRepository } from "../src/postgres-cashu-stellar-melt-quote-repository";
 import { PostgresInvoiceRepository } from "../src/postgres-invoice-repository";
 
@@ -74,6 +77,7 @@ const REQUEST_ISSUER = new CashuPaymentRequestIssuer({
     {
       mintUrl: MINT_URL,
       operatorId: operatorId("operator-a"),
+      requestedMode: "immediate_conversion",
       tier: "trusted",
     },
   ],
@@ -188,6 +192,70 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu Stellar melt coord
     ]);
     expect(custody).toMatchObject({ paymentId: "payment-001", proofCount: 1 });
     await expectPersistedCounts({ observations: 2 });
+
+    let quoteChecks = 0;
+    let proofObservations = 0;
+    const recoveryCoordinator = new CashuStellarMeltRecoveryCoordinator(
+      {
+        lifecycleRepository: restartedRepositories.lifecycle,
+        proofStateObservers: [
+          {
+            mintUrl: MINT_URL,
+            async observe(input) {
+              proofObservations += 1;
+              return createCashuProofStateSnapshotV1({
+                mintUrl: MINT_URL,
+                observedAt: OPERATOR_OBSERVED_AT + 2,
+                states: input.proofReferences.map((proof) => ({ state: "SPENT", y: proof.y })),
+              });
+            },
+          },
+        ],
+        proofStateRepository: restartedRepositories.proofStates,
+        quoteCheckers: [
+          {
+            mintUrl: MINT_URL,
+            async check() {
+              quoteChecks += 1;
+              return quote("PAID", OPERATOR_OBSERVED_AT + 1);
+            },
+          },
+        ],
+        quoteRepository: restartedRepositories.quote,
+        reservationRepository: restartedRepositories.reservations,
+      },
+      { clock: () => OPERATOR_OBSERVED_AT + 3 },
+    );
+
+    const accepted = await recoveryCoordinator.recover({ paymentId: "payment-001" });
+    const replay = await recoveryCoordinator.recover({ paymentId: "payment-001" });
+    const terminalCustody = await restartedRepositories.custody.findMetadata(
+      paymentId("payment-001"),
+    );
+
+    expect(accepted).toMatchObject({
+      accounting: {
+        invoice: { state: "paid" },
+        journalEntry: { reference: { settlementMode: "immediate_conversion" } },
+      },
+      lifecycle: { state: "consumed" },
+      replayed: false,
+      state: "accepted",
+    });
+    expect(replay).toMatchObject({ lifecycle: { state: "consumed" }, replayed: true });
+    expect({ operatorCalls, proofObservations, quoteChecks }).toEqual({
+      operatorCalls: 1,
+      proofObservations: 1,
+      quoteChecks: 1,
+    });
+    expect(terminalCustody).toBeUndefined();
+    await expectPersistedCounts({
+      custody: 0,
+      events: 3,
+      journals: 1,
+      observations: 3,
+      paidInvoices: 1,
+    });
   });
 
   it("persists post-authorization transport ambiguity across restart", async () => {
@@ -242,6 +310,7 @@ interface CoordinatorRepositories {
   readonly custody: PostgresCashuProofCustodyRepository;
   readonly keysets: PostgresCashuKeysetRepository;
   readonly lifecycle: PostgresCashuProofReservationLifecycleRepository;
+  readonly proofStates: PostgresCashuProofStateRepository;
   readonly quote: PostgresCashuStellarMeltQuoteRepository;
   readonly reservations: PostgresCashuProofReservationRepository;
 }
@@ -356,7 +425,7 @@ function keysetSnapshot() {
   });
 }
 
-function quote(state: "PENDING" | "UNPAID", observedAt: number) {
+function quote(state: "PAID" | "PENDING" | "UNPAID", observedAt: number) {
   return createCashuStellarMeltQuoteV1({
     amount: 1,
     expiry: QUOTE_EXPIRY,
@@ -408,6 +477,7 @@ function invoiceRecord(): CreateOpenInvoiceRecord {
     idempotencyKey: idempotencyKey("checkout-invoice-001"),
     invoice,
     requestFingerprint: createHash("sha256").update("invoice-001").digest("hex"),
+    settlementDestination: DESTINATION,
   };
 }
 
@@ -437,6 +507,7 @@ async function connectCoordinatorRepositories(): Promise<CoordinatorRepositories
     custody: await connectCustodyRepository(22),
     keysets: await connectKeysetRepository(),
     lifecycle: await connectLifecycleRepository(),
+    proofStates: await connectProofStateRepository(),
     quote: await connectQuoteRepository(),
     reservations: await connectReservationRepository(),
   };
@@ -447,6 +518,7 @@ async function closeCoordinatorRepositories(repositoriesToClose: CoordinatorRepo
     closeRepository(repositoriesToClose.custody),
     closeRepository(repositoriesToClose.keysets),
     closeRepository(repositoriesToClose.lifecycle),
+    closeRepository(repositoriesToClose.proofStates),
     closeRepository(repositoriesToClose.quote),
     closeRepository(repositoriesToClose.reservations),
   ]);
@@ -500,6 +572,15 @@ async function connectQuoteRepository(): Promise<PostgresCashuStellarMeltQuoteRe
   return repository;
 }
 
+async function connectProofStateRepository(): Promise<PostgresCashuProofStateRepository> {
+  const repository = await PostgresCashuProofStateRepository.connect({
+    connectionString: requireDatabaseUrl(),
+    maxConnections: 4,
+  });
+  repositories.push(repository);
+  return repository;
+}
+
 async function connectReservationRepository(): Promise<PostgresCashuProofReservationRepository> {
   const repository = await PostgresCashuProofReservationRepository.connect({
     connectionString: requireDatabaseUrl(),
@@ -514,26 +595,38 @@ async function closeRepository(repository: { close(): Promise<void> }): Promise<
   repositories.splice(repositories.indexOf(repository), 1);
 }
 
-async function expectPersistedCounts(expected: { readonly observations: number }): Promise<void> {
+async function expectPersistedCounts(expected: {
+  readonly custody?: number;
+  readonly events?: number;
+  readonly journals?: number;
+  readonly observations: number;
+  readonly paidInvoices?: number;
+}): Promise<void> {
   const pool = new Pool({ connectionString: requireDatabaseUrl() });
   try {
     const result = await pool.query<{
       custody: string;
       effects: string;
       events: string;
+      journals: string;
       observations: string;
+      paid_invoices: string;
     }>(`
       SELECT
         (SELECT COUNT(*) FROM cashu_bearer_proof_custody) AS custody,
         (SELECT COUNT(*) FROM cashu_operator_effects) AS effects,
         (SELECT COUNT(*) FROM cashu_proof_reservation_events) AS events,
-        (SELECT COUNT(*) FROM cashu_stellar_melt_quote_observations) AS observations
+        (SELECT COUNT(*) FROM cashu_stellar_melt_quote_observations) AS observations,
+        (SELECT COUNT(*) FROM merchant_invoice_payment_journals) AS journals,
+        (SELECT COUNT(*) FROM merchant_invoices WHERE state = 'paid') AS paid_invoices
     `);
     expect(result.rows[0]).toEqual({
-      custody: "1",
+      custody: String(expected.custody ?? 1),
       effects: "1",
-      events: "2",
+      events: String(expected.events ?? 2),
+      journals: String(expected.journals ?? 0),
       observations: String(expected.observations),
+      paid_invoices: String(expected.paidInvoices ?? 0),
     });
   } finally {
     await pool.end();
