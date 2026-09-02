@@ -26,3 +26,4 @@ Current decisions:
 - [ADR-0017: Protect Cashu Bearer Proofs in Encrypted Custody](0017-protect-cashu-bearer-proof-custody.md)
 - [ADR-0018: Bind Stellar Melt Quote Terms Before Dispatch](0018-bound-stellar-melt-quotes.md)
 - [ADR-0019: Persist Stellar Melt Quote Evidence Before Creation](0019-persist-stellar-melt-quote-evidence.md)
+- [ADR-0020: Require Quote Evidence for Melt Effects](0020-require-quote-evidence-for-melt-effects.md)

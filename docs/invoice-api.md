@@ -210,7 +210,9 @@ The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state mi
 - automatic current-ciphertext deletion on `consumed` or `released` lifecycle events;
 - one immutable Stellar melt quote attempt per payment, requiring its open invoice, active reservation,
   and encrypted custody before the single authorized creation call; and
-- one immutable quote outcome plus append-only, term-bound observations with terminal `PAID` history.
+- one immutable quote outcome plus append-only, term-bound observations with terminal `PAID` history;
+  and
+- one exact quote-to-melt-effect binding enforced by repository checks and a database trigger.
 
 Keyset, proof-reference, proof-state, quote, and lifecycle persistence are separate repository capabilities.
 Invoice issuance and HTTP payment intake do not automatically observe a mint, select a freshness

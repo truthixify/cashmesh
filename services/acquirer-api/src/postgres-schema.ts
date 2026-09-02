@@ -2092,6 +2092,110 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 8,
   }),
+  Object.freeze({
+    name: "bind_melt_effects_to_stellar_quotes",
+    sql: `
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+          FROM cashu_operator_effects AS effect
+          LEFT JOIN cashu_stellar_melt_quote_attempts AS attempt
+            ON attempt.payment_id = effect.payment_id
+          LEFT JOIN cashu_stellar_melt_quote_outcomes AS outcome
+            ON outcome.attempt_id = attempt.attempt_id
+          LEFT JOIN LATERAL (
+            SELECT observation.state
+            FROM cashu_stellar_melt_quote_observations AS observation
+            WHERE observation.attempt_id = attempt.attempt_id
+              AND observation.observed_at <= effect.started_at
+            ORDER BY observation.observed_at DESC
+            LIMIT 1
+          ) AS dispatch ON TRUE
+          WHERE effect.effect_kind = 'melt'
+            AND (
+              attempt.attempt_id IS NULL
+              OR attempt.mint_url <> effect.mint_url
+              OR outcome.outcome_kind IS DISTINCT FROM 'quoted'
+              OR outcome.quote_id IS DISTINCT FROM effect.operator_reference
+              OR outcome.expiry IS DISTINCT FROM effect.operator_reference_expires_at
+              OR outcome.recorded_at > effect.started_at
+              OR dispatch.state IS DISTINCT FROM 'UNPAID'
+            )
+        ) THEN
+          RAISE EXCEPTION 'Melt effect quote binding migration requires an explicit legacy backfill';
+        END IF;
+      END
+      $$;
+
+      CREATE FUNCTION cashmesh_validate_cashu_melt_effect_quote()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        latest_observed_at BIGINT;
+        latest_state TEXT;
+        quote_expiry BIGINT;
+        quote_id VARCHAR(36);
+        quote_mint_url VARCHAR(512);
+        quote_observed_at BIGINT;
+      BEGIN
+        IF NEW.effect_kind <> 'melt' THEN
+          RETURN NEW;
+        END IF;
+
+        SELECT
+          attempt.mint_url,
+          outcome.quote_id,
+          outcome.expiry,
+          outcome.recorded_at,
+          latest.state,
+          latest.observed_at
+        INTO
+          quote_mint_url,
+          quote_id,
+          quote_expiry,
+          quote_observed_at,
+          latest_state,
+          latest_observed_at
+        FROM cashu_stellar_melt_quote_attempts AS attempt
+        JOIN cashu_stellar_melt_quote_outcomes AS outcome
+          ON outcome.attempt_id = attempt.attempt_id
+          AND outcome.outcome_kind = 'quoted'
+        JOIN LATERAL (
+          SELECT observation.state, observation.observed_at
+          FROM cashu_stellar_melt_quote_observations AS observation
+          WHERE observation.attempt_id = attempt.attempt_id
+          ORDER BY observation.observed_at DESC
+          LIMIT 1
+        ) AS latest ON TRUE
+        WHERE attempt.payment_id = NEW.payment_id
+        FOR UPDATE OF attempt;
+
+        IF NOT FOUND
+          OR quote_mint_url <> NEW.mint_url
+          OR quote_id IS DISTINCT FROM NEW.operator_reference
+          OR quote_expiry IS DISTINCT FROM NEW.operator_reference_expires_at
+          OR quote_observed_at > NEW.started_at
+          OR latest_observed_at > NEW.started_at
+          OR latest_state <> 'UNPAID'
+          OR NEW.started_at >= quote_expiry
+        THEN
+          RAISE EXCEPTION 'Cashu melt effect requires matching dispatchable quote evidence'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_operator_effects_validate_melt_quote
+        BEFORE INSERT ON cashu_operator_effects
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_melt_effect_quote();
+    `,
+    version: 9,
+  }),
 ]);
 
 export async function applyPostgresMigrations(client: PoolClient): Promise<void> {

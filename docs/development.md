@@ -109,7 +109,7 @@ cargo test -p cashmesh-stellar-settlement live_horizon_endpoint -- --ignored
 | TypeScript domain | `pnpm --filter @cashmesh/domain test` | Invoice transitions, balanced journals, integer amounts, and operator policy |
 | Cashu adapter | `pnpm --filter @cashmesh/cashu test` | NUT-18 mapping, bounded keyset/proof/quote clients, official DLEQ validation, exact fees, and redacted bearer bundles |
 | Acquirer API | `pnpm --filter @cashmesh/acquirer-api test` | HTTP validation, runtime Cashu configuration, replay, envelope binding, privacy, and sanitized failures |
-| PostgreSQL repository integration | `pnpm test:integration` | Migration, invoice/request atomicity, Cashu evidence, reservation lifecycle, encrypted custody, Stellar quote ownership, restart, concurrency, corruption, and rollback behavior |
+| PostgreSQL repository integration | `pnpm test:integration` | Migration, invoice/request atomicity, Cashu evidence, reservation lifecycle, encrypted custody, Stellar quote ownership and effect binding, restart, concurrency, corruption, and rollback behavior |
 | Rust settlement | `cargo test --workspace` | CDK boundary, exact deposit claims, and payout recovery fixtures |
 | NUT-18 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut18_interoperability` | Pinned CDK decodes the cashu-ts fixture with the intended fields |
 | NUT-05 cross-implementation | `cargo test -p cashmesh-stellar-settlement --test nut05_interoperability` | The bounded TypeScript client and pinned CDK types accept the same Stellar quote fields |

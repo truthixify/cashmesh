@@ -50,8 +50,9 @@ security, legal, liquidity, and partner evidence.
   UUIDv7 identity, and no automatic retry.
 - Implemented: durable pre-dispatch quote attempts, single-POST authorization, ambiguity retention,
   unique mint quote ownership, and append-only terminal state history.
-- Remaining: production key management, quote-to-effect enforcement, bounded swap/melt execution, and
-  atomic paid-invoice plus balanced-journal persistence.
+- Implemented: repository- and database-enforced quote-to-melt-effect binding with historical replay.
+- Remaining: production key management, bounded swap/melt execution, and atomic paid-invoice plus
+  balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.

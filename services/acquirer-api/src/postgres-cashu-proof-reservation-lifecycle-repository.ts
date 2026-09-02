@@ -88,6 +88,19 @@ interface LifecycleEventRow extends QueryResultRow {
   readonly state: string;
 }
 
+interface MeltQuoteEvidenceRow extends QueryResultRow {
+  readonly attempt_id: string;
+  readonly dispatch_observed_at: string | null;
+  readonly dispatch_state: string | null;
+  readonly expiry: string | null;
+  readonly latest_observed_at: string | null;
+  readonly latest_state: string | null;
+  readonly mint_url: string;
+  readonly outcome_kind: string | null;
+  readonly quote_id: string | null;
+  readonly quote_observed_at: string | null;
+}
+
 interface ProofStateObservationRow extends QueryResultRow {
   readonly mint_url: string;
   readonly observed_at: string;
@@ -311,6 +324,9 @@ export class PostgresCashuProofReservationLifecycleRepository
           effect.startedAt < reservation.reservedAt
         ) {
           return failInvalidTransition();
+        }
+        if (effect.kind === "melt") {
+          await this.assertMeltQuoteEvidence(client, reservation, effect, "dispatch");
         }
 
         const effectFingerprint = createEffectFingerprint(reservation, effect);
@@ -748,6 +764,9 @@ export class PostgresCashuProofReservationLifecycleRepository
     if (effectResult.rows.length > 1 || (effect !== undefined && eventResult.rows.length === 0)) {
       return failInvalidRecord();
     }
+    if (effect?.kind === "melt") {
+      await this.assertMeltQuoteEvidence(client, reservation, effect, "stored");
+    }
 
     const events: CashuReservationLifecycleEventV1[] = [];
     let currentState: CashuProofReservationState = "reserved";
@@ -1031,6 +1050,80 @@ export class PostgresCashuProofReservationLifecycleRepository
       (state !== "released" && activeInvoiceClaims !== (hasEffect ? 1 : 0))
     ) {
       return failInvalidRecord();
+    }
+  }
+
+  private async assertMeltQuoteEvidence(
+    client: PoolClient,
+    reservation: ReservationScope,
+    effect: Extract<CashuOperatorEffectV1, { readonly kind: "melt" }>,
+    mode: "dispatch" | "stored",
+  ): Promise<void> {
+    const result = await client.query<MeltQuoteEvidenceRow>(
+      `
+        SELECT
+          attempt.attempt_id,
+          attempt.mint_url,
+          outcome.outcome_kind,
+          outcome.quote_id,
+          outcome.expiry,
+          outcome.recorded_at AS quote_observed_at,
+          dispatch.state AS dispatch_state,
+          dispatch.observed_at AS dispatch_observed_at,
+          latest.state AS latest_state,
+          latest.observed_at AS latest_observed_at
+        FROM cashu_stellar_melt_quote_attempts AS attempt
+        LEFT JOIN cashu_stellar_melt_quote_outcomes AS outcome
+          ON outcome.attempt_id = attempt.attempt_id
+        LEFT JOIN LATERAL (
+          SELECT observation.state, observation.observed_at
+          FROM cashu_stellar_melt_quote_observations AS observation
+          WHERE observation.attempt_id = attempt.attempt_id
+            AND observation.observed_at <= $2
+          ORDER BY observation.observed_at DESC
+          LIMIT 1
+        ) AS dispatch ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT observation.state, observation.observed_at
+          FROM cashu_stellar_melt_quote_observations AS observation
+          WHERE observation.attempt_id = attempt.attempt_id
+          ORDER BY observation.observed_at DESC
+          LIMIT 1
+        ) AS latest ON TRUE
+        WHERE attempt.payment_id = $1
+        FOR UPDATE OF attempt
+      `,
+      [reservation.paymentId, effect.startedAt],
+    );
+    const row = result.rows[0];
+    if (row === undefined || row.outcome_kind !== "quoted") {
+      if (mode === "stored") {
+        return failInvalidRecord();
+      }
+      throw new CashuProofReservationLifecycleRepositoryError(
+        "quote_evidence_missing",
+        "Cashu melt dispatch requires a persisted quoted outcome.",
+      );
+    }
+
+    const immutableTermsMatch =
+      row.mint_url === reservation.mintUrl &&
+      row.quote_id === effect.operatorReference &&
+      parseNullableSafeInteger(row.expiry) === effect.operatorReferenceExpiresAt &&
+      parseNullableSafeInteger(row.quote_observed_at) <= effect.startedAt &&
+      row.dispatch_state === "UNPAID" &&
+      parseNullableSafeInteger(row.dispatch_observed_at) <= effect.startedAt;
+    const dispatchStateMatches =
+      row.latest_state === "UNPAID" &&
+      parseNullableSafeInteger(row.latest_observed_at) <= effect.startedAt;
+    if (!immutableTermsMatch || (mode === "dispatch" && !dispatchStateMatches)) {
+      if (mode === "stored") {
+        return failInvalidRecord();
+      }
+      throw new CashuProofReservationLifecycleRepositoryError(
+        "quote_evidence_mismatch",
+        "Cashu melt dispatch does not match its persisted quote evidence.",
+      );
     }
   }
 
@@ -1503,6 +1596,13 @@ function parseSafeInteger(value: string): number {
     return failInvalidRecord();
   }
   return parsed;
+}
+
+function parseNullableSafeInteger(value: string | null): number {
+  if (value === null) {
+    return failInvalidRecord();
+  }
+  return parseSafeInteger(value);
 }
 
 function mapValidationError(error: unknown): never {

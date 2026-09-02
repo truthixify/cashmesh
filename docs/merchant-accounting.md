@@ -124,8 +124,8 @@ payment, and journal identifiers are a required persistence invariant.
   reservation lifecycle, encrypted custody, and Stellar quote evidence exist as separate capabilities
   but are not payment orchestration.
 - A bounded client can create and check a `stellar` melt quote, and a repository persists one attempt,
-  outcome, and observation history per payment. No component enforces that record on a melt effect or
-  sends the encrypted bearer proofs to an operator.
+  outcome, and observation history per payment. The lifecycle and database enforce that record on a
+  melt effect, but no coordinator sends the encrypted bearer proofs to an operator.
 - The issued operator-policy snapshot is recorded; merchant-specific cap decisions and suspension
   state are not.
 - No conversion, redemption, payout, refund, reversal, or chargeback entry exists.

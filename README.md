@@ -36,6 +36,8 @@ merchant balances, or move funds.
   while binding every later observation to the original terms.
 - Persist one pre-dispatch Stellar quote attempt per payment, retain ambiguous creation without retry,
   and append immutable quote-state observations across restart.
+- Require every new melt effect to match that payment's persisted mint, quote ID, expiry, and current
+  `UNPAID` evidence before dispatch can start.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.

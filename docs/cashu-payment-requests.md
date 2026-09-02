@@ -2,8 +2,8 @@
 
 **Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, offline
 proof-integrity validation, bounded public-key and proof-state observation, durable keyset and
-proof-state evidence, local proof-reference reservation, and durable reservation lifecycle implemented;
-bearer custody, operator dispatch, and payment acceptance not implemented
+proof-state evidence, local proof-reference reservation, encrypted bearer custody, durable quote
+evidence, and reservation lifecycle implemented; operator dispatch and payment acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -225,8 +225,8 @@ terms, timestamp equivocation, and regression after `PAID` fail.
 The full Stellar request, destination, optional memo, quote ID, mint, amount, and timing are durable
 correlation metadata and must not enter telemetry or merchant-facing responses. This repository does
 not contact a mint, inspect custody plaintext, dispatch proofs, enforce fee caps, change reservation
-state, or establish merchant payment. The separately implemented lifecycle does not yet require its
-melt effect to reference this stored quote.
+state, or establish merchant payment. The lifecycle repository and PostgreSQL require every new melt
+effect to match this payment's mint, quote ID, expiry, and dispatch-time `UNPAID` evidence.
 
 ## Proof-Reservation Lifecycle
 
@@ -248,6 +248,11 @@ a new payment to claim proofs that are still provably unspent. Consumed and ambi
 their claims. Exact event retries replay; conflicting identities or evidence fail. PostgreSQL repeats
 the transition, ordering, effect-kind, proof-state, dispatch-ownership, and active-projection rules
 below the repository.
+
+Starting a melt additionally requires the same payment's persisted quoted outcome, exact mint, quote
+ID and expiry, a latest `UNPAID` observation no later than the effect start, and a start before expiry.
+Stored lifecycle reconstruction validates that historical state while allowing later quote observations.
+Only a future coordinator may use a fresh, non-replayed insertion to authorize one outbound call.
 
 This boundary stores sanitized effect evidence, not a trusted receipt. It does not compute the
 canonical dispatch fingerprint, authenticate a mint response, retain bearer proofs, send NUT-03 or

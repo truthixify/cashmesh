@@ -180,8 +180,13 @@ The quoted outcome owns one UUIDv7 per mint and starts with the validated `UNPAI
 observations append in completion-time order, bind every immutable term, permit `PENDING` to return to
 `UNPAID`, and prohibit regression after `PAID`. PostgreSQL repeats the active-reservation, custody,
 expiry, uniqueness, ordering, and append-only constraints, while repository reads reconstruct and
-fingerprint the complete history. The repository does not call the client or enforce that a later melt
-effect uses this quote; that coordinator and database binding remain required before bearer access.
+fingerprint the complete history.
+
+The lifecycle repository and PostgreSQL require each new melt effect to use that payment's exact mint,
+UUIDv7 quote ID, expiry, and latest `UNPAID` observation no later than the effect start. Recovery
+validates the historical dispatch-time observation while allowing later `PENDING` or `PAID` history.
+No coordinator yet turns the fresh effect insertion into scoped bearer decryption and one bounded
+outbound call; replay is recovery-only and must not authorize another melt.
 
 ## Durable Journal Scope
 

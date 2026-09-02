@@ -63,6 +63,8 @@ of Cashu or Stellar implementations.
   or expiry; an observed `PAID` quote never regresses locally.
 - One persisted creation attempt owns a payment; only its first insert authorizes the single POST, and
   transport ambiguity cannot become automatic retry permission.
+- Every new melt effect matches the persisted payment, mint, quote ID, expiry, and dispatch-time
+  `UNPAID` evidence; exact replay never authorizes another outbound call.
 - A melt cannot be released as unpaid before its bound quote expires.
 - A melt quote state never substitutes for exact reserved-proof state or matching effect evidence.
 - Consumption requires matching success and a later exact all-`SPENT` snapshot.
@@ -233,7 +235,9 @@ reservation, encrypted custody record, issued operator, and mint before creation
 authorizes one POST; replay is recovery-only. One immutable outcome records either transport ambiguity
 or the initial `UNPAID` quote, and append-only observations preserve exact terms and terminal `PAID`
 history. Full requests, destinations, quote IDs, and timing remain correlation-sensitive. This boundary
-does not yet force the separately implemented melt effect to reference the stored quote.
+is enforced by the lifecycle repository and a database trigger: a new melt effect must match the stored
+mint, quote ID, expiry, and current `UNPAID` evidence. Later state observations do not invalidate the
+historical dispatch binding, but they also do not prove exact proof consumption.
 
 A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. It binds
 the key ID and an exact reservation fingerprint as associated data, records every 96-bit nonce in an

@@ -187,6 +187,8 @@ export type CashuProofReservationLifecycleRepositoryErrorCode =
   | "invalid_transition"
   | "invoice_claimed"
   | "proof_state_evidence_missing"
+  | "quote_evidence_mismatch"
+  | "quote_evidence_missing"
   | "reservation_not_found"
   | "storage_unavailable";
 

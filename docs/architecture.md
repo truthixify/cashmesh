@@ -64,7 +64,8 @@ bearer dispatch. It validates the exact testnet USDC SEP-0007 profile, accepts o
 identifiers, and binds every check to the original amount, request, fee, method, unit, mint, and expiry.
 It does not itself persist the quote or present proofs to the operator. A separate acquirer repository
 persists one creation attempt per reserved payment before the POST, retains an ambiguous outcome without
-retry, and appends exact quote observations across restart.
+retry, and appends exact quote observations across restart. A melt lifecycle effect can start only from
+the same payment's matching, unexpired, currently `UNPAID` quote evidence.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -224,9 +225,11 @@ reservation, rejects key/nonce reuse across terminal histories, and exposes plai
 self-destroying callback. Its local AES adapter uses a key-provider port; no production KMS or HSM
 adapter exists. The quote repository requires that custody and the active reservation before it grants
 one creation authorization, binds one quote identity per mint, retains ambiguous creation, and prevents
-state regression after `PAID`. It is not yet enforced as a prerequisite of lifecycle melt effects.
-Repositories reconstruct stored records through validated adapters before return. See
-the [merchant invoice API](invoice-api.md) for request and replay semantics.
+state regression after `PAID`. The lifecycle repository and a database trigger require every new melt
+effect to match that payment's mint, quote ID, expiry, and dispatch-time `UNPAID` observation.
+Historical reads retain that binding while permitting later `PENDING` or `PAID` observations.
+Repositories reconstruct stored records through validated adapters before return. See the
+[merchant invoice API](invoice-api.md) for request and replay semantics.
 
 Later migrations must preserve the fixed invoice and recovery contracts and provide atomic
 transitions for:

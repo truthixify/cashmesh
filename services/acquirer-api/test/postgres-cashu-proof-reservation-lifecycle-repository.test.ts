@@ -1,9 +1,15 @@
 import {
+  CASHU_STELLAR_METHOD,
+  CASHU_STELLAR_TESTNET_NETWORK_PASSPHRASE,
+  CASHU_STELLAR_TESTNET_USDC_ASSET_CODE,
+  CASHU_STELLAR_TESTNET_USDC_ISSUER,
+  CASHU_STELLAR_UNIT,
   CashuPaymentRequestIssuer,
   type CashuProofStateValue,
   createCashuKeysetSnapshotV1,
   createCashuProofReferenceV1,
   createCashuProofStateSnapshotV1,
+  createCashuStellarMeltQuoteV1,
 } from "@cashmesh/cashu";
 import {
   createInvoiceV1,
@@ -17,7 +23,6 @@ import {
 } from "@cashmesh/domain";
 import { Pool } from "pg";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-
 import {
   CashuProofReservationLifecycleRepositoryError,
   type ConsumeCashuProofReservationInput,
@@ -30,11 +35,13 @@ import {
 } from "../src/cashu-proof-reservation-lifecycle-repository";
 import type { ReserveCashuProofsInput } from "../src/cashu-proof-reservation-repository";
 import type { PersistCashuProofStateObservation } from "../src/cashu-proof-state-repository";
+import { cashuStellarMeltQuoteAttemptId } from "../src/cashu-stellar-melt-quote-repository";
 import type { CreateOpenInvoiceRecord } from "../src/invoice-repository";
 import { PostgresCashuKeysetRepository } from "../src/postgres-cashu-keyset-repository";
 import { PostgresCashuProofReservationLifecycleRepository } from "../src/postgres-cashu-proof-reservation-lifecycle-repository";
 import { PostgresCashuProofReservationRepository } from "../src/postgres-cashu-proof-reservation-repository";
 import { PostgresCashuProofStateRepository } from "../src/postgres-cashu-proof-state-repository";
+import { PostgresCashuStellarMeltQuoteRepository } from "../src/postgres-cashu-stellar-melt-quote-repository";
 import { PostgresInvoiceRepository } from "../src/postgres-invoice-repository";
 
 const DATABASE_URL = process.env.CASHMESH_TEST_DATABASE_URL;
@@ -47,6 +54,10 @@ const KEYSET_PUBLIC_KEY = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f
 const PROOF_Y_A = "0239bcd9b5df9a0fcc2aae3b352954b7cfd020d2b01842a4dee62edac0f8b8cd05";
 const PROOF_Y_B = "02ab1c4a13001bbc881cf2d568048d414008ac94e0bde1cb05e96076553b1edcd5";
 const PROOF_Y_C = "02b79a5775181e7973cab6c33eea75d943d9974acefd4d2a267f0f76ef567915ff";
+const MELT_QUOTE_ID = "019e6d5a-2347-7000-89e2-35fe79f92c0e";
+const OTHER_MELT_QUOTE_ID = "019e6d5a-2348-7000-89e2-35fe79f92c0f";
+const STELLAR_DESTINATION = "GATTMQEODSDX45WZK2JFIYETXWYCU5GRJ5I3Z7P2UDYD6YFVONDM4CX4";
+const MELT_REQUEST = stellarPaymentRequest(2);
 const repositories: Array<{ close(): Promise<void> }> = [];
 const CASHU_PAYMENT_REQUEST_ISSUER = new CashuPaymentRequestIssuer({
   operators: [
@@ -140,6 +151,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
 
   it("binds melt dispatch to one operator quote and rejects malformed effect shapes", async () => {
     await seedReservation();
+    await seedMeltQuote();
     const repository = await connectLifecycleRepository();
     const melt = await repository.startEffect(startMelt());
 
@@ -168,8 +180,106 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
     });
   });
 
+  it("requires exact persisted quote evidence for every new melt effect", async () => {
+    await seedReservation();
+    const repository = await connectLifecycleRepository();
+
+    await expect(repository.startEffect(startMelt())).rejects.toMatchObject({
+      code: "quote_evidence_missing",
+    });
+
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      const insertDirectMelt = (operatorReference: string) =>
+        pool.query(
+          `
+            INSERT INTO cashu_operator_effects (
+              effect_id,
+              effect_fingerprint,
+              dispatch_fingerprint,
+              payment_id,
+              invoice_id,
+              operator_id,
+              mint_url,
+              effect_kind,
+              operator_reference,
+              operator_reference_expires_at,
+              schema_version,
+              started_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'melt', $8, $9, 1, $10)
+          `,
+          [
+            "effect-direct",
+            createFingerprint("effect-direct"),
+            createFingerprint("dispatch-direct"),
+            "payment-001",
+            "invoice-001",
+            "operator-a",
+            MINT_A,
+            operatorReference,
+            RESERVED_AT + 10,
+            RESERVED_AT + 1,
+          ],
+        );
+
+      const missingQuote = await errorFromAsync(() => insertDirectMelt(MELT_QUOTE_ID));
+      expect(missingQuote).toMatchObject({ code: "23514" });
+
+      await seedMeltQuote();
+      const wrongQuote = await errorFromAsync(() => insertDirectMelt(OTHER_MELT_QUOTE_ID));
+      expect(wrongQuote).toMatchObject({ code: "23514" });
+    } finally {
+      await pool.end();
+    }
+
+    await expect(
+      repository.startEffect(startMelt({ operatorReference: OTHER_MELT_QUOTE_ID })),
+    ).rejects.toMatchObject({ code: "quote_evidence_mismatch" });
+    await expect(
+      repository.startEffect(startMelt({ operatorReferenceExpiresAt: RESERVED_AT + 11 })),
+    ).rejects.toMatchObject({ code: "quote_evidence_mismatch" });
+    await expectLifecycleCounts({ activeInvoices: 0, activeProofs: 2, effects: 0, events: 0 });
+  });
+
+  it("dispatches from current UNPAID evidence and replays after later quote states", async () => {
+    await seedReservation();
+    const quoteRepository = await seedMeltQuote();
+    const lifecycleRepository = await connectLifecycleRepository();
+    await quoteRepository.observe({
+      attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: meltQuote({ observedAt: RESERVED_AT + 2, state: "PENDING" }),
+    });
+
+    await expect(
+      lifecycleRepository.startEffect(startMelt({ startedAt: RESERVED_AT + 3 })),
+    ).rejects.toMatchObject({ code: "quote_evidence_mismatch" });
+
+    await quoteRepository.observe({
+      attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: meltQuote({ observedAt: RESERVED_AT + 3, state: "UNPAID" }),
+    });
+    const input = startMelt({ startedAt: RESERVED_AT + 4 });
+    const started = await lifecycleRepository.startEffect(input);
+    await quoteRepository.observe({
+      attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: meltQuote({ observedAt: RESERVED_AT + 5, state: "PAID" }),
+    });
+
+    const replay = await lifecycleRepository.startEffect(input);
+    const recovered = await lifecycleRepository.findByPaymentId(paymentId("payment-001"));
+
+    expect(started.replayed).toBe(false);
+    expect(replay).toEqual({ lifecycle: started.lifecycle, replayed: true });
+    expect(recovered).toEqual(started.lifecycle);
+  });
+
   it("records pending and ambiguous evidence without releasing active claims", async () => {
     await seedReservation();
+    await seedMeltQuote();
     const repository = await connectLifecycleRepository();
     await repository.startEffect(startMelt());
     await repository.recordPending({
@@ -216,6 +326,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
 
   it("does not release a melt before its quote has expired", async () => {
     await seedReservation();
+    await seedMeltQuote();
     const repository = await connectLifecycleRepository();
     await repository.startEffect(startMelt());
     await persistProofState("UNSPENT", "UNSPENT", RESERVED_AT + 12);
@@ -463,6 +574,7 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
 
   it("makes event identifiers immutable and exact-replay only", async () => {
     await seedReservation();
+    await seedMeltQuote();
     const repository = await connectLifecycleRepository();
     await repository.startEffect(startMelt());
     const input = {
@@ -646,6 +758,85 @@ async function seedKeyset(): Promise<void> {
   });
 }
 
+async function seedMeltQuote(): Promise<PostgresCashuStellarMeltQuoteRepository> {
+  await seedOpaqueCustody();
+  const repository = await connectQuoteRepository();
+  await repository.begin({
+    amount: 2,
+    attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+    paymentId: paymentId("payment-001"),
+    request: MELT_REQUEST,
+    startedAt: unixTimestamp(RESERVED_AT),
+  });
+  await repository.recordQuote({
+    attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+    paymentId: paymentId("payment-001"),
+    quote: meltQuote(),
+  });
+  return repository;
+}
+
+async function seedOpaqueCustody(): Promise<void> {
+  const pool = new Pool({ connectionString: requireDatabaseUrl() });
+  const keyId = "lifecycle-test-key";
+  const nonce = Buffer.alloc(12, 9);
+  try {
+    await pool.query("BEGIN");
+    await pool.query(
+      `
+        INSERT INTO cashu_proof_custody_nonce_uses (key_id, nonce, payment_id, created_at)
+        VALUES ($1, $2, 'payment-001', $3)
+      `,
+      [keyId, nonce, RESERVED_AT],
+    );
+    await pool.query(
+      `
+        INSERT INTO cashu_bearer_proof_custody (
+          payment_id,
+          binding_fingerprint,
+          record_fingerprint,
+          schema_version,
+          encryption_algorithm,
+          key_id,
+          nonce,
+          authentication_tag,
+          ciphertext,
+          proof_count,
+          created_at
+        )
+        VALUES (
+          'payment-001',
+          $1,
+          $2,
+          1,
+          'aes-256-gcm-v1',
+          $3,
+          $4,
+          $5,
+          $6,
+          2,
+          $7
+        )
+      `,
+      [
+        createFingerprint("custody-binding"),
+        createFingerprint("custody-record"),
+        keyId,
+        nonce,
+        Buffer.alloc(16, 9),
+        Buffer.from([9]),
+        RESERVED_AT,
+      ],
+    );
+    await pool.query("COMMIT");
+  } catch (error) {
+    await pool.query("ROLLBACK");
+    throw error;
+  } finally {
+    await pool.end();
+  }
+}
+
 async function persistProofState(
   first: CashuProofStateValue,
   second: CashuProofStateValue,
@@ -684,6 +875,15 @@ async function connectReservationRepository(): Promise<PostgresCashuProofReserva
 
 async function connectProofStateRepository(): Promise<PostgresCashuProofStateRepository> {
   const repository = await PostgresCashuProofStateRepository.connect({
+    connectionString: requireDatabaseUrl(),
+    maxConnections: 4,
+  });
+  repositories.push(repository);
+  return repository;
+}
+
+async function connectQuoteRepository(): Promise<PostgresCashuStellarMeltQuoteRepository> {
+  const repository = await PostgresCashuStellarMeltQuoteRepository.connect({
     connectionString: requireDatabaseUrl(),
     maxConnections: 4,
   });
@@ -756,6 +956,7 @@ function startSwap(
     readonly effectId?: string;
     readonly eventId?: string;
     readonly paymentId?: string;
+    readonly startedAt?: number;
   } = {},
 ): StartCashuOperatorEffectInput {
   return {
@@ -766,17 +967,53 @@ function startSwap(
     eventId: cashuReservationLifecycleEventId(overrides.eventId ?? "event-start"),
     kind: "swap",
     paymentId: paymentId(overrides.paymentId ?? "payment-001"),
-    startedAt: unixTimestamp(RESERVED_AT + 1),
+    startedAt: unixTimestamp(overrides.startedAt ?? RESERVED_AT + 1),
   };
 }
 
-function startMelt(): StartCashuOperatorEffectInput {
+function startMelt(
+  overrides: {
+    readonly operatorReference?: string;
+    readonly operatorReferenceExpiresAt?: number;
+    readonly startedAt?: number;
+  } = {},
+): StartCashuOperatorEffectInput {
   return {
-    ...startSwap(),
+    ...startSwap(overrides.startedAt === undefined ? {} : { startedAt: overrides.startedAt }),
     kind: "melt",
-    operatorReference: cashuOperatorReference("019e6d5a-2347-7000-89e2-35fe79f92c0e"),
-    operatorReferenceExpiresAt: unixTimestamp(RESERVED_AT + 10),
+    operatorReference: cashuOperatorReference(overrides.operatorReference ?? MELT_QUOTE_ID),
+    operatorReferenceExpiresAt: unixTimestamp(
+      overrides.operatorReferenceExpiresAt ?? RESERVED_AT + 10,
+    ),
   };
+}
+
+function meltQuote(
+  overrides: { readonly observedAt?: number; readonly state?: "PAID" | "PENDING" | "UNPAID" } = {},
+) {
+  return createCashuStellarMeltQuoteV1({
+    amount: 2,
+    expiry: RESERVED_AT + 10,
+    method: CASHU_STELLAR_METHOD,
+    mintUrl: MINT_A,
+    observedAt: overrides.observedAt ?? RESERVED_AT + 1,
+    quoteId: MELT_QUOTE_ID,
+    request: MELT_REQUEST,
+    state: overrides.state ?? "UNPAID",
+    unit: CASHU_STELLAR_UNIT,
+  });
+}
+
+function stellarPaymentRequest(amount: number): string {
+  const decimalAmount = `${Math.floor(amount / 100)}.${String(amount % 100).padStart(2, "0")}`;
+  const parameters = new URLSearchParams({
+    amount: decimalAmount,
+    asset_code: CASHU_STELLAR_TESTNET_USDC_ASSET_CODE,
+    asset_issuer: CASHU_STELLAR_TESTNET_USDC_ISSUER,
+    destination: STELLAR_DESTINATION,
+    network_passphrase: CASHU_STELLAR_TESTNET_NETWORK_PASSPHRASE,
+  });
+  return `web+stellar:pay?${parameters.toString()}`;
 }
 
 interface TerminalOverrides {

@@ -243,12 +243,12 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu Stellar melt quote
     expect(replay).toEqual({ attempt: recorded.attempt, replayed: true });
   });
 
-  it("retains an unresolved attempt when dispatch starts before its outcome", async () => {
+  it("blocks dispatch until an unresolved attempt has a quoted outcome", async () => {
     await seedActiveReservation();
     const repository = await connectQuoteRepository();
     const begun = await repository.begin(beginInput());
     const lifecycle = await connectLifecycleRepository();
-    await lifecycle.startEffect({
+    const effect = {
       dispatchFingerprint: cashuOperatorDispatchFingerprint("c".repeat(64)),
       effectId: cashuOperatorEffectId("effect-001"),
       eventId: cashuReservationLifecycleEventId("event-start"),
@@ -257,19 +257,26 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu Stellar melt quote
       operatorReferenceExpiresAt: unixTimestamp(QUOTE_EXPIRY),
       paymentId: paymentId("payment-001"),
       startedAt: unixTimestamp(QUOTE_OBSERVED_AT + 1),
-    });
+    } as const;
 
-    await expect(
-      repository.recordQuote({
-        attemptId: cashuStellarMeltQuoteAttemptId("attempt-001"),
-        paymentId: paymentId("payment-001"),
-        quote: quote(),
-      }),
-    ).rejects.toMatchObject({ code: "invalid_transition" });
+    await expect(lifecycle.startEffect(effect)).rejects.toMatchObject({
+      code: "quote_evidence_missing",
+    });
     const replay = await repository.begin(beginInput());
 
     expect(replay).toEqual({ attempt: begun.attempt, replayed: true });
     await expectQuoteCounts({ attempts: 1, observations: 0, outcomes: 0 });
+
+    const recorded = await repository.recordQuote({
+      attemptId: cashuStellarMeltQuoteAttemptId("attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: quote(),
+    });
+    const started = await lifecycle.startEffect(effect);
+
+    expect(recorded.attempt.state).toBe("quoted");
+    expect(started.replayed).toBe(false);
+    await expectQuoteCounts({ attempts: 1, observations: 1, outcomes: 1 });
   });
 
   it("requires exact invoice terms, encrypted custody, and an active reservation", async () => {
