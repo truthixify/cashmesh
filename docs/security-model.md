@@ -80,6 +80,7 @@ of Cashu or Stellar implementations.
 | Forged keyset, signature, or denomination | Crediting counterfeit operator liability | Recomputed keyset IDs, validated public points, strict DLEQ, and exact key lookup |
 | Oversized, redirected, or stalled keyset endpoint | Resource exhaustion or observation of the wrong host | Exact configured HTTPS paths, no redirects or credentials, response/time limits, and bounded concurrency |
 | Malformed, redirected, or stalled proof-state endpoint | False state evidence, resource exhaustion, or observation by the wrong host | Exact configured HTTPS path, no redirects or credentials, response/time limits, and exact ordered `Y` binding |
+| Regressed or partial proof-state history | Unsafe proof release or incomplete recovery evidence | Exact reservation proof-set binding, append-only observations, and terminal `SPENT` constraints |
 | Key rotation during observation | Inconsistent activity, fee, expiry, and public-key evidence | Two matching metadata reads around unit-scoped key collection |
 | Historical keyset ID reuse | Substituted keys, unit, fee, or expiry after prior acceptance | Cross-operator immutable identity fingerprints and append-only observations |
 | Duplicate proof inside one payload | Inflated gross amount | Reject duplicate secrets before amount or fee acceptance |
@@ -175,9 +176,11 @@ correlation-sensitive and is excluded from telemetry and merchant-facing respons
 A separate bounded observer can send only reserved-style `Y` references to one configured mint's
 NUT-07 endpoint and return an in-memory `UNSPENT`, `PENDING`, or `SPENT` snapshot. It enforces exact
 response order and cardinality and discards any witness, but the query itself discloses the grouped
-references and timing to that mint. The snapshot is not persisted or wired to reservation transitions;
-it is an operator assertion that can become stale immediately and cannot establish payment, solvency,
-or a safe release after ambiguity.
+references and timing to that mint. A separate PostgreSQL repository can persist the complete snapshot
+against the exact payment reservation, require explicit freshness bounds, and prevent state from
+regressing after `SPENT`. It stores no witness or bearer field and remains disconnected from reservation
+transitions. The evidence is an operator assertion that can become stale immediately and cannot
+establish payment, solvency, or a safe release after ambiguity.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

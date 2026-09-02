@@ -78,9 +78,9 @@ The adapter pins a current release-candidate cashu-ts version behind this bounda
 
 The API exposes health, operator-policy evaluation, durable open-invoice plus strict NUT-18 request
 creation and lookup, and a non-accepting payment-envelope endpoint. Its storage adapters also persist
-append-only keyset evidence and local non-bearer proof-reference reservations. Those adapters are not
-wired into the endpoint. Authentication, proof acceptance, and terminal invoice transitions are not
-yet implemented.
+append-only keyset evidence, local non-bearer proof-reference reservations, and payment-scoped NUT-07
+state evidence. Those adapters are not wired into the endpoint. Authentication, proof acceptance, and
+terminal invoice transitions are not yet implemented.
 
 ### Merchant Console
 
@@ -178,13 +178,15 @@ or a multi-process coordination mechanism.
 
 PostgreSQL is selected for acquirer persistence. The implemented migrations store open invoice
 issuance, merchant-scoped idempotency, encoded Cashu requests, normalized operator-policy routes, and
-append-only Cashu keyset evidence and proof references. Database constraints require the invoice-creation
-reservation, invoice, request, and at least one accepted route to commit together. A separate keyset
-repository preserves immutable identity across operators, records activity per observation, and retrieves
-only observations inside a caller-supplied freshness interval. The proof-reference repository binds an
-exact observation and issued operator route, then enforces one local claim per `(mint URL, Y)` across
-restarts and concurrent workers. Repositories reconstruct stored records through validated adapters
-before return. See the [merchant invoice API](invoice-api.md) for request and replay semantics.
+append-only Cashu keyset evidence, proof references, and proof-state observations. Database constraints
+require the invoice-creation reservation, invoice, request, and at least one accepted route to commit
+together. A separate keyset repository preserves immutable identity across operators, records activity
+per observation, and retrieves only observations inside a caller-supplied freshness interval. The
+proof-reference repository binds an exact observation and issued operator route, then enforces one
+local claim per `(mint URL, Y)` across restarts and concurrent workers. The proof-state repository binds
+every complete observation to that exact reservation, preserves terminal `SPENT` history, and also
+requires a caller-supplied freshness interval. Repositories reconstruct stored records through validated
+adapters before return. See the [merchant invoice API](invoice-api.md) for request and replay semantics.
 
 Later migrations must preserve the fixed invoice and recovery contracts and provide atomic transitions
 for:
@@ -227,3 +229,4 @@ justify it.
 - [ADR-0012: Durable Cashu keyset evidence](adr/0012-persist-cashu-keyset-evidence.md)
 - [ADR-0013: Durable Cashu proof references](adr/0013-reserve-cashu-proof-references.md)
 - [ADR-0014: Bounded Cashu proof-state observation](adr/0014-observe-cashu-proof-state.md)
+- [ADR-0015: Durable Cashu proof-state evidence](adr/0015-persist-cashu-proof-state-evidence.md)

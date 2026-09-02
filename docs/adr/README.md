@@ -21,3 +21,4 @@ Current decisions:
 - [ADR-0012: Persist Cashu Keyset Identity and Observation Evidence](0012-persist-cashu-keyset-evidence.md)
 - [ADR-0013: Reserve Cashu Proof References Before Network Effects](0013-reserve-cashu-proof-references.md)
 - [ADR-0014: Observe Cashu Proof State Through a Bounded Read Client](0014-observe-cashu-proof-state.md)
+- [ADR-0015: Persist Payment-Scoped Cashu Proof-State Evidence](0015-persist-cashu-proof-state-evidence.md)

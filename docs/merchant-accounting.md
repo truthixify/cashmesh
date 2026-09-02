@@ -119,8 +119,8 @@ payment, and journal identifiers are a required persistence invariant.
   persistence are not.
 - The invoice API attaches the strict NUT-18 request and inspects its payment envelope but never
   accepts the payment.
-- Stored keyset evidence, offline proof validation, and local proof-reference reservation exist as
-  separate capabilities but are not payment orchestration.
+- Stored keyset and proof-state evidence, offline proof validation, and local proof-reference
+  reservation exist as separate capabilities but are not payment orchestration.
 - Payment acceptance does not obtain operator fee quotes, establish spent state, consume or release a
   reservation, or retain the bearer proofs needed for an operator effect.
 - The issued operator-policy snapshot is recorded; merchant-specific cap decisions and suspension

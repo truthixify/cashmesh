@@ -641,6 +641,233 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 4,
   }),
+  Object.freeze({
+    name: "persist_cashu_proof_state_observations",
+    sql: `
+      ALTER TABLE cashu_proof_reservations
+        ADD CONSTRAINT cashu_proof_reservations_state_scope_unique
+        UNIQUE (payment_id, operator_id, mint_url, unit);
+
+      CREATE TABLE cashu_proof_state_observations (
+        snapshot_fingerprint CHAR(64) PRIMARY KEY,
+        payment_id VARCHAR(128) NOT NULL,
+        operator_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        unit VARCHAR(32) NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        observed_at BIGINT NOT NULL,
+        CONSTRAINT cashu_proof_state_observations_fingerprint_payment_unique UNIQUE (
+          snapshot_fingerprint,
+          payment_id
+        ),
+        CONSTRAINT cashu_proof_state_observations_payment_time_unique UNIQUE (
+          payment_id,
+          observed_at
+        ),
+        CONSTRAINT cashu_proof_state_observations_fingerprint CHECK (
+          snapshot_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_proof_state_observations_payment_id CHECK (
+          payment_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_proof_state_observations_operator_id CHECK (
+          operator_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_proof_state_observations_mint_url CHECK (
+          mint_url ~ '^https://[^[:space:]]+$'
+        ),
+        CONSTRAINT cashu_proof_state_observations_unit CHECK (
+          unit ~ '^[a-z0-9][a-z0-9._:-]*$'
+        ),
+        CONSTRAINT cashu_proof_state_observations_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_proof_state_observations_observed_at CHECK (
+          observed_at >= 0 AND observed_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_proof_state_observations_reservation_fkey
+          FOREIGN KEY (payment_id, operator_id, mint_url, unit)
+          REFERENCES cashu_proof_reservations (payment_id, operator_id, mint_url, unit)
+          ON DELETE RESTRICT
+      );
+
+      CREATE INDEX cashu_proof_state_observations_latest_idx
+        ON cashu_proof_state_observations (
+          payment_id,
+          operator_id,
+          mint_url,
+          unit,
+          observed_at DESC,
+          snapshot_fingerprint
+        );
+
+      CREATE TABLE cashu_proof_state_observation_entries (
+        snapshot_fingerprint CHAR(64) NOT NULL,
+        payment_id VARCHAR(128) NOT NULL,
+        position SMALLINT NOT NULL,
+        proof_y CHAR(66) NOT NULL,
+        state TEXT NOT NULL,
+        CONSTRAINT cashu_proof_state_observation_entries_pkey PRIMARY KEY (
+          snapshot_fingerprint,
+          position
+        ),
+        CONSTRAINT cashu_proof_state_observation_entries_proof_unique UNIQUE (
+          snapshot_fingerprint,
+          proof_y
+        ),
+        CONSTRAINT cashu_proof_state_observation_entries_position CHECK (
+          position >= 0 AND position < 128
+        ),
+        CONSTRAINT cashu_proof_state_observation_entries_y CHECK (
+          proof_y ~ '^(02|03)[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_proof_state_observation_entries_state CHECK (
+          state IN ('UNSPENT', 'PENDING', 'SPENT')
+        ),
+        CONSTRAINT cashu_proof_state_observation_entries_observation_fkey
+          FOREIGN KEY (snapshot_fingerprint, payment_id)
+          REFERENCES cashu_proof_state_observations (snapshot_fingerprint, payment_id)
+          ON DELETE RESTRICT,
+        CONSTRAINT cashu_proof_state_observation_entries_reservation_fkey
+          FOREIGN KEY (payment_id, proof_y)
+          REFERENCES cashu_reserved_proofs (payment_id, proof_y)
+          ON DELETE RESTRICT
+      );
+
+      CREATE FUNCTION cashmesh_reject_cashu_proof_state_evidence_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Cashu proof-state evidence is append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER cashu_proof_state_observations_append_only
+        BEFORE UPDATE OR DELETE ON cashu_proof_state_observations
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_proof_state_evidence_mutation();
+
+      CREATE TRIGGER cashu_proof_state_observation_entries_append_only
+        BEFORE UPDATE OR DELETE ON cashu_proof_state_observation_entries
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_proof_state_evidence_mutation();
+
+      CREATE FUNCTION cashmesh_validate_cashu_proof_state_observation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        entry_count INTEGER;
+        expected_count INTEGER;
+        first_position INTEGER;
+        last_position INTEGER;
+        observation_fingerprint CHAR(64);
+        observation_record cashu_proof_state_observations%ROWTYPE;
+        reservation_record cashu_proof_reservations%ROWTYPE;
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          observation_fingerprint := OLD.snapshot_fingerprint;
+        ELSE
+          observation_fingerprint := NEW.snapshot_fingerprint;
+        END IF;
+
+        SELECT * INTO observation_record
+        FROM cashu_proof_state_observations
+        WHERE snapshot_fingerprint = observation_fingerprint;
+
+        IF NOT FOUND THEN
+          RETURN NULL;
+        END IF;
+
+        SELECT * INTO reservation_record
+        FROM cashu_proof_reservations
+        WHERE payment_id = observation_record.payment_id;
+
+        IF NOT FOUND
+          OR reservation_record.operator_id <> observation_record.operator_id
+          OR reservation_record.mint_url <> observation_record.mint_url
+          OR reservation_record.unit <> observation_record.unit
+          OR observation_record.observed_at < reservation_record.reserved_at
+        THEN
+          RAISE EXCEPTION 'Cashu proof-state observation requires its exact reservation scope'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        SELECT COUNT(*), MIN(position), MAX(position)
+          INTO entry_count, first_position, last_position
+        FROM cashu_proof_state_observation_entries
+        WHERE snapshot_fingerprint = observation_fingerprint;
+
+        SELECT COUNT(*) INTO expected_count
+        FROM cashu_reserved_proofs
+        WHERE payment_id = observation_record.payment_id;
+
+        IF entry_count = 0
+          OR entry_count <> expected_count
+          OR first_position <> 0
+          OR last_position <> entry_count - 1
+          OR EXISTS (
+            SELECT 1
+            FROM cashu_reserved_proofs AS proof
+            WHERE proof.payment_id = observation_record.payment_id
+              AND NOT EXISTS (
+                SELECT 1
+                FROM cashu_proof_state_observation_entries AS entry
+                WHERE entry.snapshot_fingerprint = observation_fingerprint
+                  AND entry.payment_id = observation_record.payment_id
+                  AND entry.proof_y = proof.proof_y
+              )
+          )
+        THEN
+          RAISE EXCEPTION 'Cashu proof-state observation entries are incomplete or inconsistent'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        IF EXISTS (
+          SELECT 1
+          FROM cashu_proof_state_observation_entries AS current_entry
+          JOIN cashu_proof_state_observations AS other_observation
+            ON other_observation.payment_id = observation_record.payment_id
+            AND other_observation.snapshot_fingerprint <> observation_fingerprint
+          JOIN cashu_proof_state_observation_entries AS other_entry
+            ON other_entry.snapshot_fingerprint = other_observation.snapshot_fingerprint
+            AND other_entry.proof_y = current_entry.proof_y
+          WHERE current_entry.snapshot_fingerprint = observation_fingerprint
+            AND (
+              (
+                other_observation.observed_at < observation_record.observed_at
+                AND other_entry.state = 'SPENT'
+                AND current_entry.state <> 'SPENT'
+              )
+              OR (
+                other_observation.observed_at > observation_record.observed_at
+                AND current_entry.state = 'SPENT'
+                AND other_entry.state <> 'SPENT'
+              )
+            )
+        ) THEN
+          RAISE EXCEPTION 'Cashu proof-state SPENT evidence is terminal'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER cashu_proof_state_observations_valid
+        AFTER INSERT OR UPDATE ON cashu_proof_state_observations
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_proof_state_observation();
+
+      CREATE CONSTRAINT TRIGGER cashu_proof_state_observation_entries_valid
+        AFTER UPDATE OR DELETE ON cashu_proof_state_observation_entries
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_proof_state_observation();
+    `,
+    version: 5,
+  }),
 ]);
 
 export async function applyPostgresMigrations(client: PoolClient): Promise<void> {

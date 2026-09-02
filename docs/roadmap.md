@@ -40,8 +40,9 @@ security, legal, liquidity, and partner evidence.
 - Implemented: durable keyset identity, collision history, observation replay, and freshness lookup.
 - Implemented: durable local proof-reference reservation with restart and concurrency safety.
 - Implemented: bounded, same-order NUT-07 proof-state observation without witness retention.
-- Remaining: durable proof-state evidence and reservation lifecycle plus atomic paid-invoice and
-  balanced-journal persistence.
+- Implemented: payment-scoped, durable proof-state evidence with explicit freshness and terminal
+  `SPENT` history.
+- Remaining: reservation lifecycle plus atomic paid-invoice and balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.

@@ -1,13 +1,13 @@
 # Merchant Invoice API
 
-**Status:** Open-invoice issuance and internal proof-reference reservation implemented; payment
-acceptance not implemented
+**Status:** Open-invoice issuance, internal proof-reference reservation, and proof-state evidence
+implemented; payment acceptance not implemented
 
 The acquirer API persists version `1` USDC invoices in PostgreSQL and requires a merchant-scoped
 idempotency key for every creation request. It can inspect and bind a NUT-18 payment envelope, but it
 does not yet authenticate merchants, validate proofs in the HTTP path, or transition invoices out of
-`open`. A separate repository can reserve sanitized proof references after offline validation; it is
-not connected to the public endpoint.
+`open`. Separate repositories can reserve sanitized proof references after offline validation and
+persist matching NUT-07 state evidence; neither is connected to the public endpoint.
 
 ## Create an Invoice
 
@@ -153,10 +153,11 @@ lists the normalized mint, and is not definitely underpaid before input fees. It
 A matching envelope returns `503 proof_validation_unavailable`; no proof is stored, reserved, spent,
 or submitted to an operator.
 
-The Cashu package has a deterministic offline proof validator, and separate acquirer repositories can
-load explicit keyset observations and reserve sanitized proof references. The HTTP service does not
-orchestrate them and has no NUT-07 observer or reservation lifecycle. Those internal capabilities are
-therefore intentionally not enough to change the endpoint response.
+The Cashu package has a deterministic offline proof validator and bounded NUT-07 observer. Separate
+acquirer repositories can load explicit keyset observations, reserve sanitized proof references, and
+persist exact payment-scoped proof-state evidence. The HTTP service does not orchestrate them and has
+no reservation lifecycle. Those internal capabilities are therefore intentionally not enough to change
+the endpoint response.
 
 | Status | Meaning |
 |---:|---|
@@ -176,7 +177,7 @@ official `postgres:18.6-alpine3.23` image pinned to manifest digest
 forward-only migrations under a PostgreSQL transaction-scoped advisory lock and refuses an unknown
 migration version or name.
 
-The invoice, Cashu request, keyset-evidence, and proof-reference migrations enforce:
+The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state migrations enforce:
 
 - globally unique invoice identifiers;
 - one creation record per merchant/idempotency key and one key per invoice;
@@ -193,12 +194,16 @@ The invoice, Cashu request, keyset-evidence, and proof-reference migrations enfo
 - one append-only reservation per payment ID, bound to an issued invoice/operator/mint route and exact
   keyset observation; and
 - one local claim per `(mint URL, Y)`, with exact replay and transactional proof-set cardinality and
-  amount checks.
+  amount checks;
+- one append-only proof-state snapshot per payment and observation time, bound to that reservation's
+  exact scope and complete `Y` set; and
+- terminal `SPENT` history, including observations inserted out of timestamp order.
 
-Keyset and proof-reference persistence are separate repository capabilities. Invoice issuance and HTTP
-payment intake do not automatically observe a mint, select a freshness interval, load a stored snapshot,
-or create a reservation. The reservation stores `Y`, keyset ID, and amount, never the proof secret,
-signature, DLEQ values, witness, memo, or raw payload.
+Keyset, proof-reference, and proof-state persistence are separate repository capabilities. Invoice
+issuance and HTTP payment intake do not automatically observe a mint, select a freshness interval, load
+a stored snapshot, create a reservation, or interpret state evidence. The reservation stores `Y`,
+keyset ID, and amount; state evidence stores `Y` and the mint-asserted enum. Neither stores the proof
+secret, signature, DLEQ values, witness, memo, or raw payload.
 
 The Cashu request migration refuses an invoice-only database that already contains invoice rows. A
 historical mint allowlist and transport cannot be inferred from an invoice, so deployment requires an

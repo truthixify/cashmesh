@@ -26,6 +26,8 @@ merchant balances, or move funds.
 - Derive and durably reserve non-spendable NUT-07 proof references without retaining bearer proofs.
 - Observe NUT-07 proof state through a bounded, credential-free HTTPS client without retaining
   witnesses.
+- Persist append-only, payment-scoped proof-state evidence with explicit freshness and terminal
+  `SPENT` history.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -61,7 +63,7 @@ frameworks adapt to it at the edges.
 | Path | Responsibility |
 |---|---|
 | `apps/merchant-console/` | Next.js merchant operations reference client |
-| `services/acquirer-api/` | Fastify policy, durable invoice API, keyset evidence, and proof-reference reservation |
+| `services/acquirer-api/` | Fastify policy, durable invoice API, keyset and proof-state evidence, and proof-reference reservation |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
 | `packages/cashu/` | NUT-18, bounded keyset and proof-state observation, proof integrity, fees, and proof-reference adapter plus interoperability fixture |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |

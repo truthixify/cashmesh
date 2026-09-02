@@ -1,8 +1,9 @@
 # Cashu Merchant Payment Requests
 
 **Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, offline
-proof-integrity validation, bounded public-key observation, durable keyset evidence, and local
-proof-reference reservation implemented; operator effects and payment acceptance not implemented
+proof-integrity validation, bounded public-key and proof-state observation, durable keyset and
+proof-state evidence, and local proof-reference reservation implemented; operator effects and payment
+acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -185,13 +186,24 @@ retry.
 
 The observer requires exactly one same-order response for every requested `Y` and accepts only
 `UNSPENT`, `PENDING`, or `SPENT`. It validates the optional witness field but discards its value before
-constructing an immutable snapshot timestamped at completion. It does not persist the snapshot or wire
-it into the payment endpoint, reservation lifecycle, redemption, invoice state, or accounting.
+constructing an immutable snapshot timestamped at completion. It does not itself persist the snapshot
+or wire it into the payment endpoint, reservation lifecycle, redemption, invoice state, or accounting.
 
 This read reveals the queried `Y` grouping and timing to the mint. The result is the mint's current
 assertion, not proof of honesty, solvency, future unspentness, successful redemption, or merchant
 payment. In particular, `UNSPENT` can become stale immediately and `PENDING` cannot authorize release
 of a local reservation.
+
+The acquirer can separately persist a complete snapshot against one exact payment reservation. It
+rechecks the payment, operator, mint, unit, reservation time, and full sorted `Y` set before writing.
+One payment and observation time has one fingerprinted result; exact retries replay, changed results
+conflict, and concurrent workers serialize through the reservation row. Inclusive caller-supplied
+freshness bounds select the latest acceptable observation.
+
+`UNSPENT` and `PENDING` can move between each other until a proof becomes `SPENT`. `SPENT` is terminal
+even when evidence is backfilled out of order. PostgreSQL repeats exact proof-set coverage and terminal
+history constraints below the repository. The store remains append-only, unscheduled, non-accepting,
+and witness-free; it does not interpret a snapshot as payment or change the sticky reservation.
 
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
@@ -211,11 +223,11 @@ operator redemption, or merchant settlement. Separate proof tests cover an offic
 deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. Keyset
 and proof-state observer tests cover stable metadata, exact request/response binding, unit filtering,
 concurrency, response bounds, transport timeouts, and failure paths entirely through local fixtures.
-PostgreSQL tests cover restart,
-historical collision rejection, freshness bounds, exact keyset-observation binding, concurrent replay,
-proof-reference exclusion, append-only enforcement, rollback, and stored-record corruption. They do not
-prove endpoint authenticity, an appropriate production freshness policy, unspentness, redemption, or
-merchant settlement. Do not present a locally issued fixture request as payable.
+PostgreSQL tests cover restart, historical collision rejection, freshness bounds, exact keyset and
+proof-state binding, terminal state history, concurrent replay, proof-reference exclusion, append-only
+enforcement, rollback, and stored-record corruption. They do not prove endpoint authenticity, an
+appropriate production freshness policy, mint honesty, redemption, or merchant settlement. Do not
+present a locally issued fixture request as payable.
 
 ## References
 
