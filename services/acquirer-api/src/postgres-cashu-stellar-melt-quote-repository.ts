@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import {
-  CASHU_STELLAR_MELT_QUOTE_SCHEMA_VERSION,
   CASHU_STELLAR_UNIT,
   type CashuStellarMeltQuoteRequestV1,
-  type CashuStellarMeltQuoteState,
   type CashuStellarMeltQuoteV1,
   createCashuStellarMeltQuoteRequestV1,
   createCashuStellarMeltQuoteV1,
@@ -12,7 +10,6 @@ import {
 } from "@cashmesh/cashu";
 import {
   invoiceId,
-  type OperatorId,
   operatorId,
   type PaymentId,
   paymentId,
@@ -20,7 +17,18 @@ import {
   unixTimestamp,
 } from "@cashmesh/domain";
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
-
+import {
+  type CashuStellarMeltQuoteAttemptRecord,
+  type CashuStellarMeltQuoteObservationRecord,
+  type CashuStellarMeltQuoteOutcomeRecord,
+  createCashuStellarMeltQuoteAttemptFingerprint as createAttemptFingerprint,
+  createCashuStellarMeltQuotedOutcomeFingerprint,
+  createCashuStellarMeltQuoteObservationFingerprint,
+  mapCashuStellarMeltQuoteAttemptRecord,
+  mapCashuStellarMeltQuotedEvidenceRecord,
+  type StoredCashuStellarMeltQuoteAttempt as StoredAttemptBase,
+  type StoredCashuStellarMeltQuotedEvidence,
+} from "./cashu-stellar-melt-quote-record";
 import {
   type BeginCashuStellarMeltQuoteAttemptInput,
   CASHU_STELLAR_MELT_QUOTE_AMBIGUITY_REASONS,
@@ -38,45 +46,11 @@ import {
 } from "./cashu-stellar-melt-quote-repository";
 import { applyPostgresMigrations } from "./postgres-schema";
 
-interface AttemptRow extends QueryResultRow {
-  readonly amount: string;
-  readonly attempt_fingerprint: string;
-  readonly attempt_id: string;
-  readonly invoice_id: string;
-  readonly method: string;
-  readonly mint_url: string;
-  readonly operator_id: string;
-  readonly payment_id: string;
-  readonly request: string;
-  readonly schema_version: number;
-  readonly started_at: string;
-  readonly unit: string;
-}
+interface AttemptRow extends QueryResultRow, CashuStellarMeltQuoteAttemptRecord {}
 
-interface OutcomeRow extends QueryResultRow {
-  readonly ambiguity_reason: string | null;
-  readonly attempt_id: string;
-  readonly expiry: string | null;
-  readonly fee_reserve: string | null;
-  readonly mint_url: string;
-  readonly outcome_fingerprint: string;
-  readonly outcome_kind: string;
-  readonly payment_id: string;
-  readonly quote_id: string | null;
-  readonly recorded_at: string;
-  readonly schema_version: number;
-}
+interface OutcomeRow extends QueryResultRow, CashuStellarMeltQuoteOutcomeRecord {}
 
-interface ObservationRow extends QueryResultRow {
-  readonly attempt_id: string;
-  readonly mint_url: string;
-  readonly observed_at: string;
-  readonly payment_id: string;
-  readonly quote_id: string;
-  readonly schema_version: number;
-  readonly snapshot_fingerprint: string;
-  readonly state: string;
-}
+interface ObservationRow extends QueryResultRow, CashuStellarMeltQuoteObservationRecord {}
 
 interface ReservationContextRow extends QueryResultRow {
   readonly active_proof_count: string;
@@ -127,18 +101,6 @@ interface ValidatedQuoteInput {
   readonly attemptId: CashuStellarMeltQuoteAttemptId;
   readonly paymentId: PaymentId;
   readonly quote: CashuStellarMeltQuoteV1;
-}
-
-interface StoredAttemptBase {
-  readonly attemptFingerprint: string;
-  readonly attemptId: CashuStellarMeltQuoteAttemptId;
-  readonly invoiceId: ReturnType<typeof invoiceId>;
-  readonly mintUrl: string;
-  readonly operatorId: OperatorId;
-  readonly paymentId: PaymentId;
-  readonly request: CashuStellarMeltQuoteRequestV1;
-  readonly schemaVersion: typeof CASHU_STELLAR_MELT_QUOTE_ATTEMPT_SCHEMA_VERSION;
-  readonly startedAt: UnixTimestamp;
 }
 
 const ATTEMPT_SELECT = `
@@ -416,8 +378,14 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
         const row = await this.lockAttempt(client, validated.attemptId, validated.paymentId);
         const attempt = mapAttemptBase(row);
         assertInitialQuote(attempt, validated.quote);
-        const outcomeFingerprint = createQuotedOutcomeFingerprint(attempt, validated.quote);
-        const observationFingerprint = createObservationFingerprint(attempt, validated.quote);
+        const outcomeFingerprint = createCashuStellarMeltQuotedOutcomeFingerprint(
+          attempt,
+          validated.quote,
+        );
+        const observationFingerprint = createCashuStellarMeltQuoteObservationFingerprint(
+          attempt,
+          validated.quote,
+        );
         const existing = await this.findOutcome(client, attempt.attemptId);
         if (existing !== undefined) {
           if (existing.outcome_kind !== "quoted") {
@@ -492,7 +460,10 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
           return failInvalidTransition();
         }
         assertObservedQuote(attempt, outcome, validated.quote);
-        const fingerprint = createObservationFingerprint(attempt, validated.quote);
+        const fingerprint = createCashuStellarMeltQuoteObservationFingerprint(
+          attempt,
+          validated.quote,
+        );
         const existing = await this.findObservation(
           client,
           attempt.attemptId,
@@ -792,44 +763,20 @@ export class PostgresCashuStellarMeltQuoteRepository implements CashuStellarMelt
       return failInvalidRecord();
     }
 
-    const recordedAt = unixTimestamp(parseSafeInteger(outcome.recorded_at));
-    const expiry = parseSafeInteger(outcome.expiry ?? "");
-    const feeReserve = parseSafeInteger(outcome.fee_reserve ?? "");
-    const observations = observationResult.rows.map((observation) =>
-      mapObservation(attempt, outcome, observation, expiry, feeReserve),
-    );
-    const first = observations[0];
-    if (
-      first === undefined ||
-      first.observedAt !== recordedAt ||
-      first.state !== "UNPAID" ||
-      recordedAt < attempt.startedAt ||
-      first.expiry <= first.observedAt ||
-      first.expiry - attempt.startedAt > MAX_CASHU_STELLAR_MELT_QUOTE_TTL_SECONDS ||
-      createQuotedOutcomeFingerprint(attempt, first) !== outcome.outcome_fingerprint
-    ) {
+    let evidence: StoredCashuStellarMeltQuotedEvidence;
+    try {
+      evidence = mapCashuStellarMeltQuotedEvidenceRecord(row, outcome, observationResult.rows);
+    } catch {
       return failInvalidRecord();
     }
-    for (let position = 1; position < observations.length; position += 1) {
-      const previous = observations[position - 1];
-      const current = observations[position];
-      if (
-        previous === undefined ||
-        current === undefined ||
-        current.observedAt <= previous.observedAt ||
-        (previous.state === "PAID" && current.state !== "PAID")
-      ) {
-        return failInvalidRecord();
-      }
-    }
-    const latestQuote = observations.at(-1);
+    const latestQuote = evidence.observations.at(-1);
     if (latestQuote === undefined) {
       return failInvalidRecord();
     }
     return Object.freeze({
-      ...publicAttemptBase(attempt),
+      ...publicAttemptBase(evidence.attempt),
       latestQuote,
-      observations: Object.freeze(observations),
+      observations: evidence.observations,
       state: "quoted",
     });
   }
@@ -1020,34 +967,8 @@ function assertBeginPreconditions(attempt: StoredAttemptBase, row: ReservationCo
 
 function mapAttemptBase(row: AttemptRow): StoredAttemptBase {
   try {
-    const request = createCashuStellarMeltQuoteRequestV1({
-      amount: parseSafeInteger(row.amount),
-      request: row.request,
-    });
-    const base = {
-      attemptId: cashuStellarMeltQuoteAttemptId(row.attempt_id),
-      invoiceId: invoiceId(row.invoice_id),
-      mintUrl: normalizeCashuMintUrl(row.mint_url),
-      operatorId: operatorId(row.operator_id),
-      paymentId: paymentId(row.payment_id),
-      request,
-      schemaVersion: CASHU_STELLAR_MELT_QUOTE_ATTEMPT_SCHEMA_VERSION,
-      startedAt: unixTimestamp(parseSafeInteger(row.started_at)),
-    };
-    if (
-      row.schema_version !== CASHU_STELLAR_MELT_QUOTE_ATTEMPT_SCHEMA_VERSION ||
-      row.method !== request.method ||
-      row.unit !== request.unit ||
-      row.mint_url !== base.mintUrl ||
-      createAttemptFingerprint(base) !== row.attempt_fingerprint
-    ) {
-      return failInvalidRecord();
-    }
-    return Object.freeze({ ...base, attemptFingerprint: row.attempt_fingerprint });
-  } catch (error) {
-    if (error instanceof CashuStellarMeltQuoteRepositoryError) {
-      throw error;
-    }
+    return mapCashuStellarMeltQuoteAttemptRecord(row);
+  } catch {
     return failInvalidRecord();
   }
 }
@@ -1063,48 +984,6 @@ function publicAttemptBase(attempt: StoredAttemptBase) {
     schemaVersion: attempt.schemaVersion,
     startedAt: attempt.startedAt,
   } as const;
-}
-
-function mapObservation(
-  attempt: StoredAttemptBase,
-  outcome: OutcomeRow,
-  row: ObservationRow,
-  expiry: number,
-  feeReserve: number,
-): CashuStellarMeltQuoteV1 {
-  try {
-    if (
-      row.attempt_id !== attempt.attemptId ||
-      row.payment_id !== attempt.paymentId ||
-      row.mint_url !== attempt.mintUrl ||
-      row.quote_id !== outcome.quote_id ||
-      row.schema_version !== CASHU_STELLAR_MELT_QUOTE_SCHEMA_VERSION
-    ) {
-      return failInvalidRecord();
-    }
-    const quote = createCashuStellarMeltQuoteV1({
-      amount: attempt.request.amount,
-      expiry,
-      feeReserve,
-      method: attempt.request.method,
-      mintUrl: attempt.mintUrl,
-      observedAt: parseSafeInteger(row.observed_at),
-      quoteId: row.quote_id,
-      request: attempt.request.request,
-      schemaVersion: row.schema_version,
-      state: parseQuoteState(row.state),
-      unit: attempt.request.unit,
-    });
-    if (createObservationFingerprint(attempt, quote) !== row.snapshot_fingerprint) {
-      return failInvalidRecord();
-    }
-    return quote;
-  } catch (error) {
-    if (error instanceof CashuStellarMeltQuoteRepositoryError) {
-      throw error;
-    }
-    return failInvalidRecord();
-  }
 }
 
 function assertInitialQuote(attempt: StoredAttemptBase, quote: CashuStellarMeltQuoteV1): void {
@@ -1152,22 +1031,6 @@ function assertMatchingTerms(attempt: StoredAttemptBase, quote: CashuStellarMelt
   }
 }
 
-function createAttemptFingerprint(attempt: Omit<StoredAttemptBase, "attemptFingerprint">): string {
-  return sha256({
-    amount: attempt.request.amount,
-    attemptId: attempt.attemptId,
-    invoiceId: attempt.invoiceId,
-    method: attempt.request.method,
-    mintUrl: attempt.mintUrl,
-    operatorId: attempt.operatorId,
-    paymentId: attempt.paymentId,
-    request: attempt.request.request,
-    schemaVersion: attempt.schemaVersion,
-    startedAt: attempt.startedAt,
-    unit: attempt.request.unit,
-  });
-}
-
 function createAmbiguousOutcomeFingerprint(
   attempt: StoredAttemptBase,
   input: ValidatedAmbiguous,
@@ -1180,50 +1043,6 @@ function createAmbiguousOutcomeFingerprint(
     paymentId: attempt.paymentId,
     recordedAt: input.recordedAt,
     schemaVersion: attempt.schemaVersion,
-  });
-}
-
-function createQuotedOutcomeFingerprint(
-  attempt: StoredAttemptBase,
-  quote: CashuStellarMeltQuoteV1,
-): string {
-  return sha256({
-    amount: quote.amount,
-    attemptFingerprint: attempt.attemptFingerprint,
-    attemptId: attempt.attemptId,
-    expiry: quote.expiry,
-    feeReserve: quote.feeReserve,
-    kind: "quoted",
-    method: quote.method,
-    mintUrl: quote.mintUrl,
-    paymentId: attempt.paymentId,
-    quoteId: quote.quoteId,
-    recordedAt: quote.observedAt,
-    request: quote.request,
-    schemaVersion: attempt.schemaVersion,
-    unit: quote.unit,
-  });
-}
-
-function createObservationFingerprint(
-  attempt: StoredAttemptBase,
-  quote: CashuStellarMeltQuoteV1,
-): string {
-  return sha256({
-    amount: quote.amount,
-    attemptId: attempt.attemptId,
-    expiry: quote.expiry,
-    feeReserve: quote.feeReserve,
-    method: quote.method,
-    mintUrl: quote.mintUrl,
-    observedAt: quote.observedAt,
-    operatorId: attempt.operatorId,
-    paymentId: attempt.paymentId,
-    quoteId: quote.quoteId,
-    request: quote.request,
-    schemaVersion: quote.schemaVersion,
-    state: quote.state,
-    unit: quote.unit,
   });
 }
 
@@ -1240,13 +1059,6 @@ function parseAmbiguityReason(value: string | null): CashuStellarMeltQuoteAmbigu
     return failInvalidRecord();
   }
   return value as CashuStellarMeltQuoteAmbiguityReason;
-}
-
-function parseQuoteState(value: string): CashuStellarMeltQuoteState {
-  if (value !== "UNPAID" && value !== "PENDING" && value !== "PAID") {
-    return failInvalidRecord();
-  }
-  return value;
 }
 
 function parseSafeInteger(value: string): number {

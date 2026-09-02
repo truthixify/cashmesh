@@ -72,6 +72,9 @@ quote evidence. An internal acquirer coordinator selects the executor by the res
 derives input fees from its exact historical keyset snapshot, scopes custody decryption to the call,
 and authorizes the client only after a fresh effect insert. It records returned quote state plus
 `pending` or conservative attention without retrying or claiming proof consumption.
+A separate atomic repository operation can accept only the current immediate-conversion Stellar
+profile after matching persisted `PAID` and exact all-`SPENT` evidence. It derives the canonical
+testnet USDC asset account and commits invoice, journal, consumed event, and custody deletion together.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -99,9 +102,11 @@ lifecycle binds one canonical dispatch fingerprint, preserves ambiguous effects,
 exact proof-state evidence before consumption or release. Terminal lifecycle events delete current
 ciphertext transactionally while an append-only nonce-use record remains. An internal coordinator can
 connect those records to one bounded zero-fee melt call for the reservation's configured mint and
-persists pending or ambiguous outcomes across restart. These capabilities are not wired into the
-payment endpoint. Production key management, protected-mint authentication, proof acceptance,
-recovery observation, and terminal invoice transitions are not yet implemented.
+persists pending or ambiguous outcomes across restart. Confirmed immediate-conversion melts can be
+accounted internally in one transaction, but successful swaps remain blocked without replacement-proof
+custody. These capabilities are not wired into the payment endpoint. Production key management,
+protected-mint authentication, proof-validation orchestration, destination authorization, recovery
+observation, and public terminal invoice flows are not yet implemented.
 
 ### Merchant Console
 
@@ -144,7 +149,7 @@ stateDiagram-v2
     DispatchStarted --> Pending: melt pending
     DispatchStarted --> NeedsAttention: ambiguous or invalid response
     Pending --> NeedsAttention: outcome becomes ambiguous
-    DispatchStarted --> Consumed: matching success and all SPENT
+    DispatchStarted --> Consumed: melt paid and all SPENT
     Pending --> Consumed: melt paid and all SPENT
     NeedsAttention --> Consumed: recovered success and all SPENT
     DispatchStarted --> Released: terminal failure and all UNSPENT
@@ -182,6 +187,12 @@ journal reference binds invoice, merchant, payment, operator, and settlement mod
 limited to one operator e-cash or settlement-asset debit, one matching merchant-payable credit, and an
 optional fee-revenue credit.
 
+PostgreSQL implements this boundary for the immediate-conversion Stellar testnet USDC profile. Exact
+persisted `PAID` quote evidence and a later all-`SPENT` snapshot authorize one transaction containing
+the paid invoice, balanced journal, consumed lifecycle event, and current-custody deletion. The asset
+account is derived from the pinned profile. Trusted-hold acceptance remains disabled until replacement
+swap outputs are recoverable.
+
 The invoice validity interval is `[createdAt, expiresAt)`. Payment and cancellation are invalid at the
 expiry second; expiration is valid from that second onward. See the
 [merchant accounting contract](merchant-accounting.md) for the version `1` fields and persistence
@@ -217,12 +228,14 @@ The settlement compatibility crate has a single-process, atomically replaced JSO
 cursor, claim, prepared-envelope, and payout recovery across restart. It is not the production database
 or a multi-process coordination mechanism.
 
-PostgreSQL is selected for acquirer persistence. The implemented migrations store open invoice
-issuance, merchant-scoped idempotency, encoded Cashu requests, normalized operator-policy routes, and
-append-only Cashu keyset evidence, proof references, and proof-state observations. Database constraints
-require the invoice-creation reservation, invoice, request, and at least one accepted route to commit
-together. A separate keyset repository preserves immutable identity across operators, records activity
-per observation, and retrieves only observations inside a caller-supplied freshness interval. The
+PostgreSQL is selected for acquirer persistence. The implemented migrations store open and paid
+invoices, merchant-scoped idempotency, encoded Cashu requests, normalized operator-policy routes,
+immutable payment journals, and append-only Cashu keyset evidence, proof references, and proof-state
+observations. New requests carry an authenticated fingerprint over their complete issued bytes and
+ordered route policy. Database constraints require the invoice-creation reservation, invoice, request,
+and exact declared route count to commit together. A separate keyset repository preserves immutable
+identity across operators, records activity per observation, and retrieves only observations inside a
+caller-supplied freshness interval. The
 proof-reference repository binds an exact observation and issued operator route, then enforces one
 active claim per `(mint URL, Y)` across restarts and concurrent workers. The proof-state repository
 binds every complete observation to that exact reservation, preserves terminal `SPENT` history, and
@@ -239,15 +252,23 @@ Historical reads retain that binding while permitting later `PENDING` or `PAID` 
 The internal coordinator derives the fee from the exact historical keyset evidence, chooses a
 mint-specific executor, authorizes only a non-replayed effect, and records a returned quote observation
 or attention while leaving all proof claims active.
+The acceptance operation requires the exact persisted `PAID` observation and later all-`SPENT`
+snapshot, reconstructs and authenticates the full quote attempt and issued route set, then atomically
+stores the paid invoice, canonical Stellar USDC journal, consumed event, and custody deletion. Deferred
+constraints repeat that complete relationship, while issued route and accounting rows are append-only.
+The accounting migration locks issuance and payment tables in application write order and refuses
+consumed or active legacy payments plus every pre-fingerprint issued request. Retirement or reviewed
+backfill is required before upgrade; migration does not silently leave legacy invoices unreadable.
 Repositories reconstruct stored records through validated adapters before return. See the
 [merchant invoice API](invoice-api.md) for request and replay semantics.
 
 Later migrations must preserve the fixed invoice and recovery contracts and provide atomic
 transitions for:
 
-- confirmed proof consumption, terminal invoice state, and the balanced merchant journal;
+- expiry and cancellation state;
+- trusted-hold swap output custody and accounting;
 - one idempotency key to one external payout attempt;
-- merchant ledger debit/credit pairs;
+- refund, reversal, and merchant-settlement journal pairs;
 - webhook delivery attempts; and
 - reconciliation checkpoints.
 
@@ -291,3 +312,4 @@ justify it.
 - [ADR-0020: Require quote evidence for melt effects](adr/0020-require-quote-evidence-for-melt-effects.md)
 - [ADR-0021: Authorize bounded zero-fee Stellar melt dispatch](adr/0021-authorize-zero-fee-stellar-melt-dispatch.md)
 - [ADR-0022: Coordinate one fresh Stellar melt dispatch](adr/0022-coordinate-fresh-stellar-melt-dispatch.md)
+- [ADR-0023: Atomically account confirmed Stellar melt payments](adr/0023-atomically-account-stellar-melt-payments.md)

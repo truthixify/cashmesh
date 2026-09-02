@@ -1,15 +1,14 @@
 # Merchant Invoice API
 
-**Status:** Open-invoice issuance, internal Cashu evidence, proof-reservation lifecycle, and encrypted
-bearer custody implemented; payment acceptance not implemented
+**Status:** Open-invoice issuance and internal evidence-gated paid-melt accounting implemented; public
+payment acceptance not implemented
 
 The acquirer API persists version `1` USDC invoices in PostgreSQL and requires a merchant-scoped
 idempotency key for every creation request. It can inspect and bind a NUT-18 payment envelope, but it
-does not yet authenticate merchants, validate proofs in the HTTP path, or transition invoices out of
-`open`. Separate repositories can reserve sanitized proof references after offline validation, persist
-matching NUT-07 state evidence, manage a conservative reservation lifecycle, and hold an exact spend
-bundle as reservation-bound authenticated ciphertext; none is connected to the public endpoint or an
-operator dispatch adapter.
+does not yet authenticate merchants or validate proofs in the HTTP path. Internal repositories can
+reserve sanitized proof references, persist matching NUT-07 and Stellar quote evidence, coordinate a
+bounded melt, and atomically transition an invoice to `paid` with its journal after confirmation. None
+of that acceptance flow is connected to the public endpoint.
 
 ## Create an Invoice
 
@@ -93,6 +92,8 @@ to one merchant. CashMesh hashes a canonical tuple of merchant, amount, expiry, 
   `Idempotency-Replayed: true`, and `replayed: true`.
 - A replay still succeeds after process restart or invoice expiry because it returns historical
   issuance state rather than attempting to create a new invoice.
+- A replay after internal payment acceptance still returns the original `open` issuance snapshot; it
+  is not a current invoice-status endpoint.
 - Reusing the same merchant/key pair with different terms returns `409 idempotency_conflict`.
 - The same key may be used by a different merchant.
 
@@ -118,10 +119,11 @@ responses use `Cache-Control: no-store` and explicit serialization schemas. Look
 persisted Cashu request alongside the invoice; it never rebuilds historical request bytes from current
 operator configuration.
 
-The stored lifecycle state remains `open` until a terminal transition is implemented. A read or replay
-can therefore return `state=open` after `expiresAt`; clients and the future payment receiver must still
-apply the invoice validity interval `[createdAt, expiresAt)` and must not treat that state alone as
-authorization to accept payment.
+The public flow currently has no path that invokes a terminal transition. An open read can therefore
+return `state=open` after `expiresAt`; clients must still apply `[createdAt, expiresAt)` and must not
+treat state alone as payment authorization. When internal acceptance marks an invoice paid, the open
+lookup excludes it. Idempotency replay remains an issuance-history response and deliberately
+reconstructs the original `open` snapshot rather than current payment state.
 
 ## Inspect a Payment Envelope
 
@@ -158,9 +160,10 @@ or submitted to an operator.
 The Cashu package has a deterministic offline proof validator and bounded NUT-07 observer. Separate
 acquirer repositories can load explicit keyset observations, reserve sanitized proof references,
 persist exact payment-scoped proof-state evidence, manage lifecycle claims, encrypt the minimum spend
-bundle for an exact reservation, and coordinate one fresh zero-fee melt against stored quote evidence.
-The HTTP service does not orchestrate those capabilities. Internal dispatch is therefore intentionally
-not enough to change the endpoint response.
+bundle for an exact reservation, coordinate one fresh zero-fee melt against stored quote evidence,
+and atomically account a confirmed immediate-conversion melt. The HTTP service does not orchestrate
+those capabilities. Internal dispatch alone is therefore intentionally not enough to change the
+endpoint response.
 
 | Status | Meaning |
 |---:|---|
@@ -187,10 +190,12 @@ The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state mi
 - matching merchant ownership through a composite foreign key;
 - version `1`, `usdc`, positive safe-integer amounts, safe timestamps, and `expiresAt > createdAt`;
 - constrained invoice, merchant, and idempotency identifiers;
-- `open` as the only persistable state in the current schema;
+- `open` and evidence-gated `paid` as the only persistable states in the current schema;
 - one request per invoice, one through 16 ordered routes, unique operator and mint identities, strict
-  policy tuples, HTTPS endpoints, and a URL-safe `creqA` shape;
-- reconstruction of stored request bytes through the pinned adapter before returning a record;
+  policy tuples, HTTPS endpoints, a URL-safe `creqA` shape, and an authenticated fingerprint over the
+  complete issued request and ordered route policy;
+- reconstruction of stored request bytes and verification of its route count, route details, and
+  fingerprint through the pinned adapter before returning or accepting a record;
 - one immutable identity per normalized mint URL and keyset ID, even across operator configurations;
 - one append-only observation per operator, mint, unit, and observation time;
 - reconstruction and fingerprint verification before a keyset snapshot is returned as fresh;
@@ -211,8 +216,14 @@ The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state mi
 - one immutable Stellar melt quote attempt per payment, requiring its open invoice, active reservation,
   and encrypted custody before the single authorized creation call; and
 - one immutable quote outcome plus append-only, term-bound observations with terminal `PAID` history;
-  and
-- one exact quote-to-melt-effect binding enforced by repository checks and a database trigger.
+- full quote-attempt reconstruction and fingerprint verification before dispatch or acceptance; and
+- one exact quote-to-melt-effect binding enforced by repository checks and a database trigger;
+- one immutable paid-invoice journal per accepted payment, with exactly balanced canonical
+  settlement-asset, merchant-payable, and optional fee postings;
+- a consumed event, exact persisted `PAID` melt observation, later all-`SPENT` snapshot, issued
+  immediate-conversion route, and paid invoice that must commit as one coherent record; and
+- append-only issued route decisions, rejection of reservations against unauthenticated legacy route
+  sets, and atomic current-ciphertext deletion at acceptance.
 
 Keyset, proof-reference, proof-state, quote, and lifecycle persistence are separate repository capabilities.
 Invoice issuance and HTTP payment intake do not automatically observe a mint, select a freshness
@@ -228,10 +239,13 @@ The Cashu request migration refuses an invoice-only database that already contai
 historical mint allowlist and transport cannot be inferred from an invoice, so deployment requires an
 explicit reviewed backfill or retirement of local-only legacy records before upgrade.
 
-Supporting `paid`, `expired`, or `cancelled` records requires a new migration with state-specific fields
-and checks. In particular, payment acceptance must atomically connect confirmed reservation
-consumption to the paid invoice and balanced journal; durable lifecycle evidence alone does not satisfy
-that accounting boundary.
+The paid-accounting migration takes access-exclusive locks on invoice creation, invoices, issued
+requests, routes, reservations, and lifecycle events in application write order. It refuses existing
+`consumed` events, any reservation not already proven `released`, and every issued request that predates
+the authenticated route fingerprint. Historical journal, fee, asset, and route policy cannot be
+inferred, and migration cannot leave an issued invoice silently unreadable. Deployments must retire or
+explicitly backfill those records before upgrade. Persisting `expired` or `cancelled` records still
+requires a later migration with state-specific fields and checks.
 
 ## Error and Privacy Boundary
 
@@ -253,7 +267,7 @@ Bearer-proof ciphertext is still custody. Logical terminal deletion does not gua
 from PostgreSQL page history, WAL, replicas, snapshots, or backups, and the local key-provider port is
 not a production key-management implementation. The internal melt coordinator wires scoped decryption
 to canonical outbound request binding only after a fresh durable effect insert. Do not expose that
-capability through this route until proof validation, recovery, terminal invoice accounting,
+capability through this route until proof-validation orchestration, recovery observation,
 authentication, and operational controls are also complete.
 
 Automatic HTTP access logs are disabled because request paths contain merchant and invoice identifiers.

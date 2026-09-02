@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   type AcceptedOperatorRouteV1,
   type CashuPaymentRequestV1,
@@ -28,20 +29,26 @@ import {
 } from "./invoice-repository";
 import { applyPostgresMigrations } from "./postgres-schema";
 
-interface InvoiceRow extends QueryResultRow {
-  readonly amount: string;
+export interface StoredCashuPaymentRequestRow {
   readonly cashu_schema_version: number | null;
-  readonly created_at: string;
   readonly encoded_request: string | null;
   readonly encoding: string | null;
+  readonly issued_at: string | null;
+  readonly mint_policy: string | null;
+  readonly operator_count: number | null;
+  readonly route_set_fingerprint: string | null;
+  readonly transport_url: string | null;
+}
+
+interface InvoiceRow extends QueryResultRow, StoredCashuPaymentRequestRow {
+  readonly amount: string;
+  readonly created_at: string;
   readonly expires_at: string;
   readonly id: string;
-  readonly issued_at: string | null;
   readonly merchant_id: string;
-  readonly mint_policy: string | null;
+  readonly paid_at: string | null;
   readonly schema_version: number;
   readonly state: string;
-  readonly transport_url: string | null;
   readonly unit: string;
 }
 
@@ -49,7 +56,7 @@ interface CreationRow extends InvoiceRow {
   readonly request_fingerprint: string;
 }
 
-interface CashuOperatorRow extends QueryResultRow {
+export interface StoredCashuOperatorRouteRow {
   readonly mint_url: string;
   readonly mode: string;
   readonly operator_id: string;
@@ -57,6 +64,8 @@ interface CashuOperatorRow extends QueryResultRow {
   readonly reason: string;
   readonly tier: string;
 }
+
+interface CashuOperatorRow extends QueryResultRow, StoredCashuOperatorRouteRow {}
 
 interface ReservationRow extends QueryResultRow {
   readonly invoice_id: string;
@@ -78,11 +87,14 @@ const ISSUED_INVOICE_SELECT = `
     invoice.created_at,
     invoice.expires_at,
     invoice.state,
+    invoice.paid_at,
     cashu.schema_version AS cashu_schema_version,
     cashu.encoded_request,
     cashu.encoding,
     cashu.issued_at,
     cashu.mint_policy,
+    cashu.operator_count,
+    cashu.route_set_fingerprint,
     cashu.transport_url
   FROM merchant_invoices AS invoice
   LEFT JOIN invoice_cashu_requests AS cashu
@@ -226,7 +238,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       client = await this.pool.connect();
       const result = await client.query<InvoiceRow>(
         `${ISSUED_INVOICE_SELECT}
-          WHERE invoice.merchant_id = $1 AND invoice.id = $2`,
+          WHERE invoice.merchant_id = $1 AND invoice.id = $2 AND invoice.state = 'open'`,
         [ownerId, requestedInvoiceId],
       );
       const row = result.rows[0];
@@ -244,7 +256,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       client = await this.pool.connect();
       const result = await client.query<InvoiceRow>(
         `${ISSUED_INVOICE_SELECT}
-          WHERE invoice.id = $1`,
+          WHERE invoice.id = $1 AND invoice.state = 'open'`,
         [requestedInvoiceId],
       );
       const row = result.rows[0];
@@ -299,9 +311,11 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           encoding,
           issued_at,
           mint_policy,
+          operator_count,
+          route_set_fingerprint,
           transport_url
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       `,
       [
         invoice.id,
@@ -311,6 +325,8 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         request.encoding,
         request.issuedAt,
         request.mintPolicy,
+        request.operators.length,
+        createCashuPaymentRequestRouteSetFingerprint(invoice.merchantId, request),
         request.transportUrl,
       ],
     );
@@ -382,11 +398,14 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           invoice.created_at,
           invoice.expires_at,
           invoice.state,
+          invoice.paid_at,
           cashu.schema_version AS cashu_schema_version,
           cashu.encoded_request,
           cashu.encoding,
           cashu.issued_at,
           cashu.mint_policy,
+          cashu.operator_count,
+          cashu.route_set_fingerprint,
           cashu.transport_url
         FROM invoice_creation_requests AS creation
         JOIN merchant_invoices AS invoice
@@ -413,7 +432,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       `,
       [invoice.id],
     );
-    const cashuPaymentRequest = mapCashuPaymentRequest(row, operators.rows, invoice);
+    const cashuPaymentRequest = reconstructStoredCashuPaymentRequest(row, operators.rows, invoice);
     return Object.freeze({ cashuPaymentRequest, invoice });
   }
 
@@ -438,17 +457,28 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
 }
 
 function mapInvoiceRow(row: InvoiceRow): OpenInvoiceV1 {
-  if (row.schema_version !== 1 || row.unit !== "usdc" || row.state !== "open") {
+  if (row.schema_version !== 1 || row.unit !== "usdc") {
     throw new InvoiceRepositoryError(
       "invalid_record",
       "Stored invoice schema, unit, or state is unsupported.",
     );
   }
   try {
+    const createdAt = unixTimestamp(parseSafeInteger(row.created_at));
+    const expiresAt = unixTimestamp(parseSafeInteger(row.expires_at));
+    const paidAt = row.paid_at === null ? undefined : unixTimestamp(parseSafeInteger(row.paid_at));
+    if (
+      !(
+        (row.state === "open" && paidAt === undefined) ||
+        (row.state === "paid" && paidAt !== undefined && paidAt >= createdAt && paidAt < expiresAt)
+      )
+    ) {
+      throw new Error("Stored invoice state is invalid.");
+    }
     return createInvoiceV1({
       amount: minorUnits(parseSafeInteger(row.amount)),
-      createdAt: unixTimestamp(parseSafeInteger(row.created_at)),
-      expiresAt: unixTimestamp(parseSafeInteger(row.expires_at)),
+      createdAt,
+      expiresAt,
       id: invoiceId(row.id),
       merchantId: merchantId(row.merchant_id),
     });
@@ -457,9 +487,9 @@ function mapInvoiceRow(row: InvoiceRow): OpenInvoiceV1 {
   }
 }
 
-function mapCashuPaymentRequest(
-  row: InvoiceRow,
-  operatorRows: readonly CashuOperatorRow[],
+export function reconstructStoredCashuPaymentRequest(
+  row: StoredCashuPaymentRequestRow,
+  operatorRows: readonly StoredCashuOperatorRouteRow[],
   invoice: OpenInvoiceV1,
 ): CashuPaymentRequestV1 {
   try {
@@ -469,6 +499,8 @@ function mapCashuPaymentRequest(
       row.encoding !== "creqA" ||
       row.issued_at === null ||
       row.mint_policy !== "strict" ||
+      row.operator_count !== operatorRows.length ||
+      row.route_set_fingerprint === null ||
       row.transport_url === null ||
       operatorRows.length === 0
     ) {
@@ -503,6 +535,8 @@ function mapCashuPaymentRequest(
     if (
       reconstructed.encodedRequest !== row.encoded_request ||
       reconstructed.transportUrl !== row.transport_url ||
+      row.route_set_fingerprint !==
+        createCashuPaymentRequestRouteSetFingerprint(invoice.merchantId, reconstructed) ||
       !operatorRows.every((operator, position) =>
         sameOperatorRoute(operator, reconstructed.operators[position]),
       )
@@ -516,6 +550,37 @@ function mapCashuPaymentRequest(
     }
     return failInvalidCashuRecord();
   }
+}
+
+export function createCashuPaymentRequestRouteSetFingerprint(
+  ownerId: MerchantId,
+  request: CashuPaymentRequestV1,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        amount: request.amount,
+        encodedRequest: request.encodedRequest,
+        encoding: request.encoding,
+        expiresAt: request.expiresAt,
+        invoiceId: request.invoiceId,
+        issuedAt: request.issuedAt,
+        merchantId: ownerId,
+        mintPolicy: request.mintPolicy,
+        operators: request.operators.map((route, position) => ({
+          mintUrl: route.mintUrl,
+          mode: route.mode,
+          operatorId: route.operatorId,
+          position,
+          reason: route.reason,
+          tier: route.tier,
+        })),
+        schemaVersion: request.schemaVersion,
+        transportUrl: request.transportUrl,
+        unit: request.unit,
+      }),
+    )
+    .digest("hex");
 }
 
 function validateCashuPaymentRequest(
@@ -571,7 +636,7 @@ function sameCashuPaymentRequest(
 }
 
 function sameOperatorRoute(
-  row: CashuOperatorRow,
+  row: StoredCashuOperatorRouteRow,
   route: AcceptedOperatorRouteV1 | undefined,
 ): boolean {
   return (

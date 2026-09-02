@@ -55,9 +55,13 @@ security, legal, liquidity, and partner evidence.
   pre-network authorization, strict response binding, and no automatic retry.
 - Implemented: multi-operator Stellar melt coordination with historical input-fee derivation, scoped
   custody decryption, fresh-effect-only dispatch, and durable pending or attention outcomes.
-- Remaining: production key management, bounded swap execution, recovery observation, and atomic
-  paid-invoice plus balanced-journal persistence.
-- Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
+- Implemented: atomic immediate-conversion melt acceptance from exact persisted `PAID` plus all-`SPENT`
+  evidence, with a paid invoice, balanced journal, consumed event, and custody deletion in one
+  PostgreSQL transaction.
+- Remaining: production key management, bounded swap execution with replacement-proof custody,
+  recovery observation, and public payment-acceptance orchestration.
+- Remaining: public verified NUT-18 payment acceptance and advisory mint support after catch-all
+  conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.
 - Receipts, refund records, webhooks, accounting export, and manual attention.

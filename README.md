@@ -43,6 +43,9 @@ dispatch-capable melt client and must be treated as bearer-value code.
   before one bounded non-retrying POST, and return only sanitized quote state.
 - Coordinate encrypted custody, historical NUT-02 fees, mint-specific executors, and durable
   pending/attention outcomes so only one fresh melt effect can authorize one operator call.
+- Atomically accept a confirmed immediate-conversion melt only after exact `PAID` quote and all-`SPENT`
+  proof evidence, committing the paid invoice, balanced journal, consumed lifecycle event, and custody
+  deletion together.
 - Decode one NUT-18 fixture with independently pinned cashu-ts and CDK implementations.
 - Produce deterministic SEP-0007 requests for an exact Stellar testnet USDC tuple.
 - Decode joined Horizon fixtures and atomically reject wrong network, asset, amount, expiry, or replay.
@@ -78,7 +81,7 @@ frameworks adapt to it at the edges.
 | Path | Responsibility |
 |---|---|
 | `apps/merchant-console/` | Next.js merchant operations reference client |
-| `services/acquirer-api/` | Fastify policy, durable invoice API, Cashu evidence, encrypted proof custody, quote ownership, reservation lifecycle, and internal melt coordination |
+| `services/acquirer-api/` | Fastify policy, durable invoice API, Cashu evidence, encrypted proof custody, quote ownership, reservation lifecycle, internal melt coordination, and atomic paid-melt accounting |
 | `packages/domain/` | Invoice, balanced journal, integer money, and operator acceptance rules |
 | `packages/cashu/` | NUT-18, bounded keyset/proof/quote/melt clients, proof integrity and fees, redacted bearer bundles, and interoperability fixtures |
 | `crates/stellar-settlement/` | CDK processor, Stellar profile, journal, fixtures, and recovery rules |

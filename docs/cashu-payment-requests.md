@@ -3,8 +3,8 @@
 **Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, offline
 proof-integrity validation, bounded public-key and proof-state observation, durable keyset and
 proof-state evidence, local proof-reference reservation, encrypted bearer custody, durable quote
-evidence, reservation lifecycle, and internal zero-fee melt coordination implemented; payment
-acceptance not implemented
+evidence, reservation lifecycle, internal zero-fee melt coordination, and atomic paid-melt accounting
+implemented; public payment acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -280,11 +280,13 @@ operation. A melt additionally binds its NUT-05 quote ID and expiry. Immutable e
 restart. One active invoice claim and one dispatch binding prevent competing local effects.
 
 A pre-dispatch reservation may be released without mint evidence. After dispatch starts, ambiguity
-always retains the invoice and proof claims. Matching swap success or melt `PAID` evidence consumes
-only with a persisted exact all-`SPENT` NUT-07 snapshot at or after that outcome. A definite swap
-rejection releases only with later exact all-`UNSPENT` evidence. A melt requires both an `UNPAID`
-outcome at or after the bound quote expiry and later exact all-`UNSPENT` evidence. Mixed state,
-`PENDING`, timeout, and pre-expiry `UNPAID` never authorize release.
+always retains the invoice and proof claims. A confirmed immediate-conversion melt can be consumed
+only through atomic payment acceptance with the exact persisted `PAID` observation and an exact
+all-`SPENT` NUT-07 snapshot at or after that outcome. Swap success cannot be accepted until replacement
+proof outputs have durable custody. A definite swap rejection releases only with later exact
+all-`UNSPENT` evidence. A melt requires both an `UNPAID` outcome at or after the bound quote expiry and
+later exact all-`UNSPENT` evidence. Mixed state, `PENDING`, timeout, and pre-expiry `UNPAID` never
+authorize release.
 
 Released reservations retain immutable history while dropping active claims transactionally, allowing
 a new payment to claim proofs that are still provably unspent. Consumed and ambiguous lifecycles retain
@@ -294,14 +296,22 @@ below the repository.
 
 Starting a melt additionally requires the same payment's persisted quoted outcome, exact mint, quote
 ID and expiry, a latest `UNPAID` observation no later than the effect start, and a start before expiry.
-Stored lifecycle reconstruction validates that historical state while allowing later quote observations.
-Only the acquirer coordinator connects a fresh, non-replayed insertion to the execution client's
-authorization callback.
+Stored lifecycle reconstruction validates the complete quote attempt and its fingerprint while
+allowing later quote observations. It also reconstructs the issued request and verifies the
+authenticated ordered route policy before accounting trusts a settlement mode. Only the acquirer
+coordinator connects a fresh, non-replayed insertion to the execution client's authorization callback.
 
-This lifecycle boundary stores sanitized effect evidence, not a trusted receipt. The coordinator uses
-it to authorize one NUT-05 request and record pending or attention outcomes, but does not authenticate a
-protected mint, send NUT-03, consume proofs, transition an invoice, write accounting, or change the
-public endpoint's rejection.
+This lifecycle boundary stores sanitized effect evidence, not a trusted receipt. The fresh-dispatch
+coordinator uses it to authorize one NUT-05 request and record pending or attention outcomes, but does
+not authenticate a protected mint, send NUT-03, observe NUT-07 recovery state, invoke atomic
+acceptance, or change the public endpoint's rejection. The separate acceptance operation derives the
+pinned Stellar testnet USDC account and commits a confirmed melt's paid invoice, balanced journal,
+consumed event, and custody deletion in one transaction.
+
+The accounting migration takes access-exclusive locks in application write order and refuses legacy
+consumed history, any reservation not already proven released, and every request issued before route
+fingerprints. Accounting and route policy cannot be inferred safely, so those records require
+retirement or an explicitly reviewed backfill before upgrade can complete.
 
 ## Encrypted Bearer-Proof Custody
 
@@ -356,8 +366,9 @@ mocked HTTP only.
 PostgreSQL tests cover restart, historical collision rejection, freshness bounds, exact keyset and
 proof-state binding, terminal state history, concurrent replay, proof-reference exclusion, append-only
 enforcement, reservation lifecycle recovery, dispatch ownership, ambiguity retention, evidence-gated
-release, encrypted custody restart and key rotation, key/nonce exclusion, ciphertext tamper detection,
-terminal deletion, rollback, stored-record corruption, and coordinator restart with encrypted custody.
+release, atomic paid-melt accounting, journal balance and position enforcement, encrypted custody
+restart and key rotation, key/nonce exclusion, ciphertext tamper detection, terminal deletion,
+rollback, stored-record corruption, and coordinator restart with encrypted custody.
 They do not prove endpoint authenticity, an appropriate production freshness policy, mint honesty,
 running-mint compatibility, redemption, or merchant settlement. Do not present a locally issued fixture
 request as payable.

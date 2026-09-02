@@ -264,9 +264,12 @@ export class PostgresCashuProofReservationRepository implements CashuProofReserv
           EXISTS (
             SELECT 1
             FROM invoice_cashu_request_operators AS route
+            JOIN invoice_cashu_requests AS request
+              ON request.invoice_id = route.invoice_id
             WHERE route.invoice_id = invoice.id
               AND route.operator_id = $2
               AND route.mint_url = $3
+              AND request.route_set_fingerprint IS NOT NULL
           ) AS route_accepted
         FROM merchant_invoices AS invoice
         WHERE invoice.id = $1

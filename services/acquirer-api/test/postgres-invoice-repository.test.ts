@@ -64,6 +64,8 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
       await pool.query(
         `
           TRUNCATE
+            merchant_invoice_payment_postings,
+            merchant_invoice_payment_journals,
             cashu_stellar_melt_quote_observations,
             cashu_stellar_melt_quote_outcomes,
             cashu_stellar_melt_quote_attempts,
@@ -283,8 +285,14 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
     const pool = new Pool({ connectionString: requireDatabaseUrl() });
     try {
       await pool.query(
+        "ALTER TABLE invoice_cashu_requests DISABLE TRIGGER invoice_cashu_requests_append_only",
+      );
+      await pool.query(
         "UPDATE invoice_cashu_requests SET encoded_request = $1 WHERE invoice_id = $2",
         ["creqAinvalid", "invoice-001"],
+      );
+      await pool.query(
+        "ALTER TABLE invoice_cashu_requests ENABLE TRIGGER invoice_cashu_requests_append_only",
       );
     } finally {
       await pool.end();
@@ -303,6 +311,9 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
     const pool = new Pool({ connectionString: requireDatabaseUrl() });
     try {
       await pool.query("BEGIN");
+      await pool.query(
+        "ALTER TABLE invoice_cashu_request_operators DISABLE TRIGGER invoice_cashu_request_operators_append_only",
+      );
       await pool.query("DELETE FROM invoice_cashu_request_operators WHERE invoice_id = $1", [
         "invoice-001",
       ]);
@@ -316,12 +327,49 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL repositories", () => {
     }
   });
 
+  it("refuses an operator route appended after issuance", async () => {
+    const repository = await connectRepository();
+    await repository.createOpenInvoice(record());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      const error = await errorFromAsync(() =>
+        pool.query(
+          `
+            INSERT INTO invoice_cashu_request_operators (
+              invoice_id, merchant_id, position, operator_id, mint_url, mode, tier, reason
+            )
+            VALUES (
+              'invoice-001',
+              'merchant-001',
+              2,
+              'operator-appended',
+              'https://mint-appended.example',
+              'immediate_conversion',
+              'convertible',
+              'conversion_required'
+            )
+          `,
+        ),
+      );
+
+      expect(error).toMatchObject({ code: "23514" });
+    } finally {
+      await pool.end();
+    }
+  });
+
   it("refuses to commit an invoice after its Cashu request is removed", async () => {
     const repository = await connectRepository();
     await repository.createOpenInvoice(record());
     const pool = new Pool({ connectionString: requireDatabaseUrl() });
     try {
       await pool.query("BEGIN");
+      await pool.query(
+        "ALTER TABLE invoice_cashu_request_operators DISABLE TRIGGER invoice_cashu_request_operators_append_only",
+      );
+      await pool.query(
+        "ALTER TABLE invoice_cashu_requests DISABLE TRIGGER invoice_cashu_requests_append_only",
+      );
       await pool.query("DELETE FROM invoice_cashu_request_operators WHERE invoice_id = $1", [
         "invoice-001",
       ]);

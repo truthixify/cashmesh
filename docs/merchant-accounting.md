@@ -1,15 +1,14 @@
 # Merchant Accounting Contract
 
-**Status:** Domain contract, Cashu-ready open-invoice persistence, proof-reservation lifecycle,
-encrypted bearer custody, and internal melt dispatch implemented; payment acceptance and accounting
-orchestration not implemented
+**Status:** Domain contract and internal atomic accounting for confirmed immediate-conversion Stellar
+melts implemented; public payment acceptance not implemented
 
 This document defines the first CashMesh merchant invoice and journal schemas. Domain behavior remains
-in `packages/domain`. The acquirer now persists open invoice issuance and its strict NUT-18 request
-and can separately persist sanitized proof references after offline validation. It can hold the minimum
-spend bundle as reservation-bound authenticated ciphertext and internally coordinate one fresh
-zero-fee melt dispatch. It does not orchestrate validation through the HTTP route, accept payment,
-persist a paid-invoice journal, settle a merchant, or emit a receipt.
+in `packages/domain`. The acquirer persists open invoice issuance and its strict NUT-18 request,
+sanitized proof references, mint state evidence, encrypted bearer custody, Stellar quote observations,
+and operator effects. An internal repository can now accept a confirmed immediate-conversion melt and
+persist the paid invoice and journal atomically. The HTTP route does not orchestrate these capabilities,
+settle a merchant, or emit a receipt.
 
 ## Common Representation
 
@@ -102,14 +101,34 @@ payment orchestrator must establish that fact before it invokes the accounting t
 
 ## Atomic Payment Persistence Contract
 
-`acceptInvoicePaymentV1` returns the paid invoice and balanced journal together. A persistence adapter
-must write both in one database transaction. At minimum that transaction must:
+`acceptInvoicePaymentV1` returns the paid invoice and balanced journal together. The PostgreSQL
+lifecycle repository implements that contract for the pinned immediate-conversion Stellar testnet
+USDC profile. Acceptance requires all of:
+
+- the invoice is still `open` and the all-`SPENT` observation precedes its exclusive expiry;
+- the complete issued request and ordered route policy reconstruct under their authenticated
+  fingerprint, and the selected route is `immediate_conversion`;
+- the complete stored Stellar quote attempt reconstructs under its fingerprint and pinned profile,
+  and the exact effect-bound quote observation is durably `PAID`;
+- the exact reserved proof set is durably all `SPENT` at or after that quote observation; and
+- the debit account is the server-derived
+  `settlement_asset:stellar-testnet-usdc-circle`, never a caller-selected label.
+
+One database transaction then:
 
 1. conditionally transition the invoice from `open` to `paid`;
 2. insert the journal header and every posting;
-3. enforce unique journal id, payment id, and paid-invoice reference;
-4. commit all changes or none; and
-5. schedule receipts and webhooks only after commit.
+3. append the linked `consumed` lifecycle event;
+4. delete current encrypted bearer custody through the terminal-event trigger;
+5. enforce unique journal id, payment id, and paid-invoice reference; and
+6. commit all changes or none.
+
+The proof observation time is `paidAt`; the terminal event time is the journal's `effectiveAt`.
+Deferred database checks require exact invoice, merchant, reservation, operator, mint, authenticated
+route set, effect, quote, proof-state, lifecycle, and posting agreement at commit. Journal and posting
+rows, paid invoice fields, and issued route decisions are immutable afterward. Exact retries
+reconstruct the same accounting, while changed identifiers, fees, times, or evidence conflict.
+Receipts and webhooks must still be scheduled only after commit.
 
 Batch uniqueness checks in the domain catch duplicates already present in one in-memory batch. They do
 not replace database constraints, isolation, or an idempotency-key policy. Globally unique invoice,
@@ -117,20 +136,24 @@ payment, and journal identifiers are a required persistence invariant.
 
 ## Deliberate Limits
 
-- Open invoice creation and lookup are implemented with PostgreSQL; terminal invoice and journal
-  persistence are not.
+- PostgreSQL terminal persistence currently supports only paid invoices produced by confirmed
+  immediate-conversion Stellar melts. Expiry and cancellation persistence are not implemented.
 - The invoice API attaches the strict NUT-18 request and inspects its payment envelope but never
-  accepts the payment.
+  invokes internal acceptance.
 - Stored keyset and proof-state evidence, offline proof validation, proof-reference reservation,
-  reservation lifecycle, encrypted custody, and Stellar quote evidence exist as separate capabilities
-  but are not payment orchestration.
+  reservation lifecycle, encrypted custody, and Stellar quote evidence remain separately persisted
+  inputs. The HTTP layer does not yet assemble them into a payment workflow.
 - A bounded client can create and check a `stellar` melt quote, and a repository persists one attempt,
-  outcome, and observation history per payment. An internal coordinator can derive the historical
-  input fee, authorize one fresh zero-fee melt effect, and record pending or attention outcomes. It is
-  not wired into payment acceptance and does not consume proofs or create accounting.
+  outcome, and observation history per payment. The fresh-dispatch coordinator can record returned
+  `PAID`, but it does not itself observe NUT-07 or invoke acceptance. Recovery observation remains a
+  separate missing coordinator.
+- Successful NUT-03 swaps cannot be accepted. Replacement proofs and their exact output custody are
+  not durable yet, so trusted-hold accounting would claim an asset CashMesh cannot reconstruct.
+- Upgrade refuses requests issued before authenticated route fingerprints. They require retirement or
+  an explicitly reviewed route-policy backfill before migration can complete.
 - The issued operator-policy snapshot is recorded; merchant-specific cap decisions and suspension
   state are not.
-- No conversion, redemption, payout, refund, reversal, or chargeback entry exists.
+- No live conversion, redemption, merchant payout, refund, reversal, or chargeback entry exists.
 - No ledger balance query or accounting export exists.
 - No multi-currency or sub-cent accounting is supported.
 

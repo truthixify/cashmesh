@@ -2196,9 +2196,614 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 9,
   }),
+  Object.freeze({
+    name: "account_cashu_invoice_payments",
+    sql: `
+      LOCK TABLE
+        invoice_creation_requests,
+        merchant_invoices,
+        invoice_cashu_requests,
+        invoice_cashu_request_operators,
+        cashu_proof_reservations,
+        cashu_proof_reservation_events
+        IN ACCESS EXCLUSIVE MODE;
+
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM cashu_proof_reservation_events WHERE state = 'consumed'
+        ) THEN
+          RAISE EXCEPTION 'Cashu payment accounting migration requires an explicit consumed-payment backfill'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        IF EXISTS (
+          SELECT 1
+          FROM cashu_proof_reservations AS reservation
+          LEFT JOIN LATERAL (
+            SELECT event.state
+            FROM cashu_proof_reservation_events AS event
+            WHERE event.payment_id = reservation.payment_id
+            ORDER BY event.sequence DESC
+            LIMIT 1
+          ) AS latest ON TRUE
+          WHERE latest.state IS NULL OR latest.state <> 'released'
+        ) THEN
+          RAISE EXCEPTION 'Cashu payment accounting migration requires an explicit active-payment route backfill'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        IF EXISTS (SELECT 1 FROM invoice_cashu_requests) THEN
+          RAISE EXCEPTION 'Cashu payment accounting migration requires an explicit issued-route backfill'
+            USING ERRCODE = 'check_violation';
+        END IF;
+      END
+      $$;
+
+      ALTER TABLE invoice_cashu_requests
+        ADD COLUMN operator_count SMALLINT,
+        ADD COLUMN route_set_fingerprint CHAR(64) NOT NULL;
+
+      UPDATE invoice_cashu_requests AS request
+      SET operator_count = (
+        SELECT COUNT(*)
+        FROM invoice_cashu_request_operators AS operator
+        WHERE operator.invoice_id = request.invoice_id
+      );
+
+      SET CONSTRAINTS
+        invoice_cashu_requests_operator_required,
+        invoice_cashu_requests_invoice_required
+        IMMEDIATE;
+
+      ALTER TABLE invoice_cashu_requests
+        ALTER COLUMN operator_count SET NOT NULL,
+        ADD CONSTRAINT invoice_cashu_requests_operator_count CHECK (
+          operator_count >= 1 AND operator_count <= 16
+        ),
+        ADD CONSTRAINT invoice_cashu_requests_route_set_fingerprint CHECK (
+          route_set_fingerprint ~ '^[0-9a-f]{64}$'
+        );
+
+      SET CONSTRAINTS
+        invoice_cashu_requests_operator_required,
+        invoice_cashu_requests_invoice_required
+        DEFERRED;
+
+      CREATE OR REPLACE FUNCTION cashmesh_require_cashu_request_operator()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        actual_operator_count INTEGER;
+        expected_operator_count INTEGER;
+        request_invoice_id VARCHAR(128);
+      BEGIN
+        IF TG_TABLE_NAME = 'invoice_cashu_requests' THEN
+          request_invoice_id := NEW.invoice_id;
+        ELSIF TG_OP = 'DELETE' THEN
+          request_invoice_id := OLD.invoice_id;
+        ELSE
+          request_invoice_id := NEW.invoice_id;
+        END IF;
+
+        SELECT operator_count INTO expected_operator_count
+        FROM invoice_cashu_requests
+        WHERE invoice_id = request_invoice_id;
+
+        IF expected_operator_count IS NULL THEN
+          RETURN NULL;
+        END IF;
+
+        SELECT COUNT(*) INTO actual_operator_count
+        FROM invoice_cashu_request_operators
+        WHERE invoice_id = request_invoice_id;
+
+        IF actual_operator_count <> expected_operator_count THEN
+          RAISE EXCEPTION 'Cashu payment request operator count does not match issuance'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER invoice_cashu_request_operators_count_valid
+        AFTER INSERT ON invoice_cashu_request_operators
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_cashu_request_operator();
+
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+          FROM invoice_cashu_requests AS request
+          LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS actual_operator_count
+            FROM invoice_cashu_request_operators AS operator
+            WHERE operator.invoice_id = request.invoice_id
+          ) AS operators ON TRUE
+          WHERE request.operator_count <> operators.actual_operator_count
+        ) THEN
+          RAISE EXCEPTION 'Cashu payment request operator count backfill is inconsistent'
+            USING ERRCODE = 'check_violation';
+        END IF;
+      END
+      $$;
+
+      ALTER TABLE merchant_invoices
+        DROP CONSTRAINT merchant_invoices_state,
+        ADD COLUMN paid_at BIGINT,
+        ADD CONSTRAINT merchant_invoices_state CHECK (
+          (state = 'open' AND paid_at IS NULL)
+          OR (
+            state = 'paid'
+            AND paid_at >= created_at
+            AND paid_at < expires_at
+            AND paid_at <= 9007199254740991
+          )
+        );
+
+      CREATE TABLE merchant_invoice_payment_journals (
+        journal_entry_id VARCHAR(128) PRIMARY KEY,
+        journal_fingerprint CHAR(64) NOT NULL UNIQUE,
+        invoice_id VARCHAR(128) NOT NULL UNIQUE,
+        merchant_id VARCHAR(128) NOT NULL,
+        payment_id VARCHAR(128) NOT NULL UNIQUE,
+        operator_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        settlement_mode TEXT NOT NULL,
+        asset_account_kind TEXT NOT NULL,
+        asset_account_id VARCHAR(128) NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        accepted_at BIGINT NOT NULL,
+        effective_at BIGINT NOT NULL,
+        gross_amount BIGINT NOT NULL,
+        fee_amount BIGINT NOT NULL,
+        net_amount BIGINT NOT NULL,
+        CONSTRAINT merchant_invoice_payment_journals_journal_payment_unique UNIQUE (
+          journal_entry_id,
+          payment_id
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_id CHECK (
+          journal_entry_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_fingerprint CHECK (
+          journal_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_invoice_id CHECK (
+          invoice_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_merchant_id CHECK (
+          merchant_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_payment_id CHECK (
+          payment_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_operator_id CHECK (
+          operator_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_mint_url CHECK (
+          mint_url ~ '^https://[^[:space:]]+$'
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_account CHECK (
+          settlement_mode = 'immediate_conversion'
+          AND asset_account_kind = 'settlement_asset'
+          AND asset_account_id = 'stellar-testnet-usdc-circle'
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_schema CHECK (schema_version = 1),
+        CONSTRAINT merchant_invoice_payment_journals_time CHECK (
+          accepted_at >= 0
+          AND accepted_at <= effective_at
+          AND effective_at <= 9007199254740991
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_amounts CHECK (
+          gross_amount > 0
+          AND gross_amount <= 9007199254740991
+          AND fee_amount >= 0
+          AND fee_amount < gross_amount
+          AND net_amount = gross_amount - fee_amount
+        ),
+        CONSTRAINT merchant_invoice_payment_journals_invoice_fkey
+          FOREIGN KEY (invoice_id, merchant_id)
+          REFERENCES merchant_invoices (id, merchant_id)
+          ON DELETE RESTRICT,
+        CONSTRAINT merchant_invoice_payment_journals_reservation_fkey
+          FOREIGN KEY (payment_id, invoice_id, operator_id, mint_url)
+          REFERENCES cashu_proof_reservations (payment_id, invoice_id, operator_id, mint_url)
+          ON DELETE RESTRICT
+      );
+
+      CREATE TABLE merchant_invoice_payment_postings (
+        journal_entry_id VARCHAR(128) NOT NULL,
+        position SMALLINT NOT NULL,
+        side TEXT NOT NULL,
+        account_kind TEXT NOT NULL,
+        account_id VARCHAR(128),
+        amount BIGINT NOT NULL,
+        CONSTRAINT merchant_invoice_payment_postings_pkey PRIMARY KEY (
+          journal_entry_id,
+          position
+        ),
+        CONSTRAINT merchant_invoice_payment_postings_position CHECK (
+          position >= 0 AND position < 3
+        ),
+        CONSTRAINT merchant_invoice_payment_postings_side CHECK (side IN ('debit', 'credit')),
+        CONSTRAINT merchant_invoice_payment_postings_account CHECK (
+          (
+            account_kind IN ('operator_ecash', 'settlement_asset', 'merchant_payable')
+            AND account_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+          )
+          OR (account_kind = 'fee_revenue' AND account_id IS NULL)
+        ),
+        CONSTRAINT merchant_invoice_payment_postings_amount CHECK (
+          amount > 0 AND amount <= 9007199254740991
+        ),
+        CONSTRAINT merchant_invoice_payment_postings_journal_fkey
+          FOREIGN KEY (journal_entry_id)
+          REFERENCES merchant_invoice_payment_journals (journal_entry_id)
+          ON DELETE RESTRICT
+      );
+
+      ALTER TABLE cashu_proof_reservation_events
+        ADD COLUMN journal_entry_id VARCHAR(128),
+        ADD CONSTRAINT cashu_proof_reservation_events_accounting_shape CHECK (
+          (state = 'consumed' AND journal_entry_id IS NOT NULL)
+          OR (state <> 'consumed' AND journal_entry_id IS NULL)
+        ),
+        ADD CONSTRAINT cashu_proof_reservation_events_journal_fkey
+          FOREIGN KEY (journal_entry_id, payment_id)
+          REFERENCES merchant_invoice_payment_journals (journal_entry_id, payment_id)
+          ON DELETE RESTRICT;
+
+      CREATE FUNCTION cashmesh_reject_issued_cashu_request_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Issued Cashu request state is append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE FUNCTION cashmesh_require_issued_cashu_route_fingerprint()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF NEW.route_set_fingerprint IS NULL THEN
+          RAISE EXCEPTION 'New Cashu payment requests require an authenticated route set'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER invoice_cashu_requests_route_set_fingerprint_required
+        BEFORE INSERT ON invoice_cashu_requests
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_issued_cashu_route_fingerprint();
+
+      CREATE FUNCTION cashmesh_require_accountable_cashu_reservation_route()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        route_fingerprint CHAR(64);
+      BEGIN
+        SELECT request.route_set_fingerprint INTO route_fingerprint
+        FROM invoice_cashu_requests AS request
+        WHERE request.invoice_id = NEW.invoice_id;
+
+        IF route_fingerprint IS NULL THEN
+          RAISE EXCEPTION 'Cashu proof reservations require an authenticated issued route set'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_proof_reservations_accountable_route_required
+        BEFORE INSERT ON cashu_proof_reservations
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_accountable_cashu_reservation_route();
+
+      CREATE TRIGGER invoice_cashu_requests_append_only
+        BEFORE UPDATE OR DELETE ON invoice_cashu_requests
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_issued_cashu_request_mutation();
+
+      CREATE TRIGGER invoice_cashu_request_operators_append_only
+        BEFORE UPDATE OR DELETE ON invoice_cashu_request_operators
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_issued_cashu_request_mutation();
+
+      CREATE FUNCTION cashmesh_guard_merchant_invoice_update()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF OLD.id IS DISTINCT FROM NEW.id
+          OR OLD.merchant_id IS DISTINCT FROM NEW.merchant_id
+          OR OLD.schema_version IS DISTINCT FROM NEW.schema_version
+          OR OLD.unit IS DISTINCT FROM NEW.unit
+          OR OLD.amount IS DISTINCT FROM NEW.amount
+          OR OLD.created_at IS DISTINCT FROM NEW.created_at
+          OR OLD.expires_at IS DISTINCT FROM NEW.expires_at
+          OR OLD.state <> 'open'
+          OR OLD.paid_at IS NOT NULL
+          OR NEW.state <> 'paid'
+          OR NEW.paid_at IS NULL
+        THEN
+          RAISE EXCEPTION 'Merchant invoice mutation is not an allowed payment transition'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER merchant_invoices_payment_transition_only
+        BEFORE UPDATE ON merchant_invoices
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_guard_merchant_invoice_update();
+
+      CREATE FUNCTION cashmesh_reject_merchant_payment_accounting_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Merchant payment accounting is append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER merchant_invoice_payment_journals_append_only
+        BEFORE UPDATE OR DELETE ON merchant_invoice_payment_journals
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_merchant_payment_accounting_mutation();
+
+      CREATE TRIGGER merchant_invoice_payment_postings_append_only
+        BEFORE UPDATE OR DELETE ON merchant_invoice_payment_postings
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_merchant_payment_accounting_mutation();
+
+      CREATE FUNCTION cashmesh_validate_merchant_payment_journal()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        asset_debit_count INTEGER;
+        credit_total NUMERIC;
+        debit_count INTEGER;
+        debit_total NUMERIC;
+        entry_count INTEGER;
+        fee_credit_count INTEGER;
+        first_position INTEGER;
+        journal_record merchant_invoice_payment_journals%ROWTYPE;
+        last_position INTEGER;
+        merchant_credit_count INTEGER;
+      BEGIN
+        SELECT * INTO journal_record
+        FROM merchant_invoice_payment_journals
+        WHERE journal_entry_id = NEW.journal_entry_id;
+
+        IF journal_record.journal_entry_id IS NULL THEN
+          RETURN NULL;
+        END IF;
+
+        SELECT
+          COUNT(*),
+          MIN(position),
+          MAX(position),
+          COUNT(*) FILTER (WHERE side = 'debit'),
+          COALESCE(SUM(amount) FILTER (WHERE side = 'debit'), 0),
+          COALESCE(SUM(amount) FILTER (WHERE side = 'credit'), 0),
+          COUNT(*) FILTER (
+            WHERE side = 'debit'
+              AND position = 0
+              AND account_kind = journal_record.asset_account_kind
+              AND account_id = journal_record.asset_account_id
+              AND amount = journal_record.gross_amount
+          ),
+          COUNT(*) FILTER (
+            WHERE side = 'credit'
+              AND position = 1
+              AND account_kind = 'merchant_payable'
+              AND account_id = journal_record.merchant_id
+              AND amount = journal_record.net_amount
+          ),
+          COUNT(*) FILTER (
+            WHERE side = 'credit'
+              AND position = 2
+              AND account_kind = 'fee_revenue'
+              AND account_id IS NULL
+              AND amount = journal_record.fee_amount
+          )
+          INTO
+            entry_count,
+            first_position,
+            last_position,
+            debit_count,
+            debit_total,
+            credit_total,
+            asset_debit_count,
+            merchant_credit_count,
+            fee_credit_count
+        FROM merchant_invoice_payment_postings
+        WHERE journal_entry_id = journal_record.journal_entry_id;
+
+        IF entry_count <> (CASE WHEN journal_record.fee_amount = 0 THEN 2 ELSE 3 END)
+          OR first_position <> 0
+          OR last_position <> entry_count - 1
+          OR debit_count <> 1
+          OR debit_total <> journal_record.gross_amount
+          OR credit_total <> journal_record.gross_amount
+          OR asset_debit_count <> 1
+          OR merchant_credit_count <> 1
+          OR fee_credit_count <> (CASE WHEN journal_record.fee_amount = 0 THEN 0 ELSE 1 END)
+        THEN
+          RAISE EXCEPTION 'Merchant payment journal postings are incomplete or unbalanced'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER merchant_invoice_payment_journals_postings_valid
+        AFTER INSERT ON merchant_invoice_payment_journals
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_merchant_payment_journal();
+
+      CREATE CONSTRAINT TRIGGER merchant_invoice_payment_postings_journal_valid
+        AFTER INSERT ON merchant_invoice_payment_postings
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_merchant_payment_journal();
+
+      CREATE FUNCTION cashmesh_validate_cashu_payment_accounting()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        consumed_event cashu_proof_reservation_events%ROWTYPE;
+        effect_record cashu_operator_effects%ROWTYPE;
+        invoice_record merchant_invoices%ROWTYPE;
+        journal_record merchant_invoice_payment_journals%ROWTYPE;
+        proof_observed_at BIGINT;
+        reservation_record cashu_proof_reservations%ROWTYPE;
+        route_fingerprint CHAR(64);
+        route_mode TEXT;
+        target_invoice_id VARCHAR(128);
+      BEGIN
+        IF TG_TABLE_NAME = 'cashu_proof_reservation_events' THEN
+          IF NEW.state <> 'consumed' THEN
+            RETURN NULL;
+          END IF;
+          SELECT invoice_id INTO target_invoice_id
+          FROM cashu_proof_reservations
+          WHERE payment_id = NEW.payment_id;
+        ELSIF TG_TABLE_NAME = 'merchant_invoice_payment_journals' THEN
+          target_invoice_id := NEW.invoice_id;
+        ELSE
+          IF NEW.state <> 'paid' THEN
+            RETURN NULL;
+          END IF;
+          target_invoice_id := NEW.id;
+        END IF;
+
+        SELECT * INTO invoice_record
+        FROM merchant_invoices
+        WHERE id = target_invoice_id;
+
+        SELECT * INTO journal_record
+        FROM merchant_invoice_payment_journals
+        WHERE invoice_id = target_invoice_id;
+
+        IF journal_record.journal_entry_id IS NOT NULL THEN
+          SELECT * INTO reservation_record
+          FROM cashu_proof_reservations
+          WHERE payment_id = journal_record.payment_id;
+
+          SELECT * INTO effect_record
+          FROM cashu_operator_effects
+          WHERE payment_id = journal_record.payment_id;
+
+          SELECT * INTO consumed_event
+          FROM cashu_proof_reservation_events
+          WHERE payment_id = journal_record.payment_id
+            AND state = 'consumed';
+
+          SELECT observed_at INTO proof_observed_at
+          FROM cashu_proof_state_observations
+          WHERE payment_id = journal_record.payment_id
+            AND snapshot_fingerprint = consumed_event.proof_state_snapshot_fingerprint;
+
+          SELECT operator.mode, request.route_set_fingerprint
+          INTO route_mode, route_fingerprint
+          FROM invoice_cashu_request_operators AS operator
+          JOIN invoice_cashu_requests AS request
+            ON request.invoice_id = operator.invoice_id
+          WHERE operator.invoice_id = journal_record.invoice_id
+            AND operator.operator_id = journal_record.operator_id
+            AND operator.mint_url = journal_record.mint_url;
+        END IF;
+
+        IF invoice_record.id IS NULL
+          OR invoice_record.state <> 'paid'
+          OR journal_record.journal_entry_id IS NULL
+          OR reservation_record.payment_id IS NULL
+          OR effect_record.effect_id IS NULL
+          OR consumed_event.event_id IS NULL
+          OR proof_observed_at IS NULL
+          OR route_mode IS NULL
+          OR route_fingerprint IS NULL
+          OR journal_record.invoice_id <> invoice_record.id
+          OR journal_record.merchant_id <> invoice_record.merchant_id
+          OR journal_record.gross_amount <> invoice_record.amount
+          OR journal_record.accepted_at <> invoice_record.paid_at
+          OR journal_record.payment_id <> reservation_record.payment_id
+          OR journal_record.invoice_id <> reservation_record.invoice_id
+          OR journal_record.operator_id <> reservation_record.operator_id
+          OR journal_record.mint_url <> reservation_record.mint_url
+          OR journal_record.payment_id <> effect_record.payment_id
+          OR journal_record.journal_entry_id <> consumed_event.journal_entry_id
+          OR journal_record.payment_id <> consumed_event.payment_id
+          OR journal_record.accepted_at <> proof_observed_at
+          OR journal_record.effective_at <> consumed_event.recorded_at
+          OR journal_record.settlement_mode <> route_mode
+          OR consumed_event.evidence_kind <> 'melt_paid'
+          OR effect_record.effect_kind <> 'melt'
+          OR journal_record.settlement_mode <> 'immediate_conversion'
+          OR NOT EXISTS (
+            SELECT 1
+            FROM cashu_stellar_melt_quote_attempts AS attempt
+            JOIN cashu_stellar_melt_quote_outcomes AS outcome
+              ON outcome.attempt_id = attempt.attempt_id
+              AND outcome.outcome_kind = 'quoted'
+              AND outcome.quote_id = effect_record.operator_reference
+              AND outcome.expiry = effect_record.operator_reference_expires_at
+            JOIN cashu_stellar_melt_quote_observations AS observation
+              ON observation.attempt_id = attempt.attempt_id
+              AND observation.observed_at = consumed_event.evidence_at
+              AND observation.state = 'PAID'
+            WHERE attempt.payment_id = journal_record.payment_id
+              AND attempt.mint_url = journal_record.mint_url
+          )
+        THEN
+          RAISE EXCEPTION 'Cashu consumption requires its exact paid invoice and journal'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER merchant_invoices_cashu_payment_valid
+        AFTER INSERT OR UPDATE ON merchant_invoices
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_payment_accounting();
+
+      CREATE CONSTRAINT TRIGGER merchant_invoice_payment_journals_cashu_valid
+        AFTER INSERT ON merchant_invoice_payment_journals
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_payment_accounting();
+
+      CREATE CONSTRAINT TRIGGER cashu_consumed_events_accounting_valid
+        AFTER INSERT ON cashu_proof_reservation_events
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_payment_accounting();
+    `,
+    version: 10,
+  }),
 ]);
 
-export async function applyPostgresMigrations(client: PoolClient): Promise<void> {
+export async function applyPostgresMigrations(
+  client: PoolClient,
+  options: { readonly targetVersion?: number } = {},
+): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [MIGRATION_LOCK_ID]);
   await client.query(`
     CREATE TABLE IF NOT EXISTS cashmesh_schema_migrations (
@@ -2212,6 +2817,16 @@ export async function applyPostgresMigrations(client: PoolClient): Promise<void>
     "SELECT version, name FROM cashmesh_schema_migrations ORDER BY version",
   );
   const knownByVersion = new Map(MIGRATIONS.map((migration) => [migration.version, migration]));
+  const latestVersion = MIGRATIONS.at(-1)?.version;
+  const targetVersion = options.targetVersion ?? latestVersion;
+  if (
+    latestVersion === undefined ||
+    !Number.isSafeInteger(targetVersion) ||
+    targetVersion === undefined ||
+    !knownByVersion.has(targetVersion)
+  ) {
+    throw new Error("PostgreSQL migration target is not supported by this build.");
+  }
 
   for (const row of applied.rows) {
     const migration = knownByVersion.get(row.version);
@@ -2220,10 +2835,16 @@ export async function applyPostgresMigrations(client: PoolClient): Promise<void>
         `Database migration ${row.version}:${row.name} is not supported by this build.`,
       );
     }
+    if (row.version > targetVersion) {
+      throw new Error(`Database migration ${row.version} is newer than target ${targetVersion}.`);
+    }
   }
 
   const appliedVersions = new Set(applied.rows.map((row) => row.version));
   for (const migration of MIGRATIONS) {
+    if (migration.version > targetVersion) {
+      break;
+    }
     if (appliedVersions.has(migration.version)) {
       continue;
     }

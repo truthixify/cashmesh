@@ -45,6 +45,8 @@ of Cashu or Stellar implementations.
 - Every monetary value is a bounded integer minor-unit amount.
 - Every paid invoice is persisted atomically with one exactly balanced payment journal.
 - Invoice-payment journals bind the invoice, merchant, payment, operator, and settlement mode.
+- Immediate-conversion melt journals derive the pinned Stellar testnet USDC account from server code;
+  neither the caller nor mutable route state can relabel it.
 - Trusted e-cash assets remain separated by operator in every posting.
 - Operator tiers and caps are evaluated at payment time and recorded with the decision.
 - A strict payment request lists only accepted operators and never advertises unlisted-mint support.
@@ -69,7 +71,9 @@ of Cashu or Stellar implementations.
   the current execution profile rejects every nonzero fee reserve and performs no automatic retry.
 - A melt cannot be released as unpaid before its bound quote expires.
 - A melt quote state never substitutes for exact reserved-proof state or matching effect evidence.
-- Consumption requires matching success and a later exact all-`SPENT` snapshot.
+- Current consumption requires an immediate-conversion melt, its exact persisted `PAID` observation,
+  and a later exact all-`SPENT` snapshot before invoice expiry. Swap success remains non-acceptable
+  until replacement outputs have durable custody.
 - Merchant balances reconcile to immutable invoice and settlement references.
 - Reserve visibility and redemption probes never become a solvency guarantee.
 
@@ -97,6 +101,9 @@ of Cashu or Stellar implementations.
 | Injected payment metadata | Secret or personal data retained in accounting | Project only declared schema fields into durable domain records |
 | Wrong-merchant journal | Misstated merchant liability | Bind merchant in the reference and require one matching payable credit |
 | Duplicate invoice payment | Double fulfillment or liability | Atomic open-to-paid transition plus database uniqueness constraints |
+| Orphaned consumption or accounting | Deleted custody without a merchant liability, or liability without spent evidence | Defer exact invoice, journal, melt, proof-state, lifecycle, and custody checks to one transaction |
+| Relabeled converted asset | Misstated settlement holdings | Derive and constrain the canonical Stellar testnet USDC account instead of accepting caller input |
+| Unauthorized Stellar melt destination | Value sent outside an approved settlement account | Keep accounting internal until quote creation binds the SEP-0007 destination to server-owned policy |
 | Duplicate invoice creation | Conflicting checkout records | Merchant-scoped request fingerprint and transactional unique reservation |
 | Cross-merchant invoice lookup | Metadata disclosure | Merchant-scoped query returning the same not-found result |
 | Request rewritten after issuance | Payer redirection or changed accepted liability | Persist exact encoded bytes and normalized route decisions with the invoice |
@@ -162,8 +169,9 @@ deployment gates, not optional hardening.
 
 ## Acquirer Database Boundary
 
-PostgreSQL now stores open invoices, idempotency fingerprints, public Cashu keyset evidence,
-non-spendable proof references, proof-state evidence, and reservation lifecycle history. Database
+PostgreSQL now stores open and paid invoices, immutable payment journals, idempotency fingerprints,
+public Cashu keyset evidence, non-spendable proof references, proof-state evidence, and reservation
+lifecycle history. Database
 constraints repeat identifier, amount, unit, schema, ownership, expiry-shape, evidence-cardinality,
 transition, and active-claim invariants. Concurrent invoice creation is serialized by a unique
 merchant/key reservation, and invoice plus reservation commit together.
@@ -214,16 +222,18 @@ that can become stale immediately and cannot establish payment or solvency by it
 A lifecycle repository separately binds one immutable swap or melt effect and an append-only sequence
 of state changes. A canonical dispatch fingerprint prevents the same outbound operation from being
 attached to multiple local payments. Melt effects also bind a quote ID and expiry. Ambiguity enters
-`needs_attention` and retains active proof and invoice claims. Consumption requires matching success
-plus exact all-`SPENT` evidence. Post-dispatch release requires matching terminal failure plus exact
-all-`UNSPENT` evidence; melt release additionally requires the `UNPAID` outcome at or after quote
-expiry. Database triggers repeat these rules and require active projections to agree with history.
+`needs_attention` and retains active proof and invoice claims. Current consumption accepts only a
+matching immediate-conversion melt `PAID` observation plus exact all-`SPENT` evidence. Post-dispatch
+release requires matching terminal failure plus exact all-`UNSPENT` evidence; melt release additionally
+requires the `UNPAID` outcome at or after quote expiry. Database triggers repeat these rules and require
+active projections to agree with history.
 
-The lifecycle stores only sanitized identities, outcomes, timestamps, and state-snapshot fingerprints.
-It does not authenticate the outcome source, hold or send bearer proofs, call a mint, mark an invoice
-paid, or write a journal. The separate execution adapter computes canonical dispatch bytes and keeps
-secrets, signatures, DLEQ values, witnesses, tokens, and raw responses out of lifecycle storage and
-telemetry.
+The lifecycle stores only sanitized identities, outcomes, timestamps, journal identity, and
+state-snapshot fingerprints. It does not authenticate the outcome source, hold or send bearer proofs,
+or call a mint. Its explicit acceptance operation can atomically mark an invoice paid and write a
+journal only after persisted evidence satisfies the complete transaction. The separate execution
+adapter computes canonical dispatch bytes and keeps secrets, signatures, DLEQ values, witnesses,
+tokens, and raw responses out of lifecycle storage and telemetry.
 
 A bounded Stellar quote client can create and check the current custom-method NUT-05 quote on one
 configured HTTPS mint. It validates the exact testnet asset, network, integer-cent amount, permitted
@@ -238,10 +248,12 @@ A separate PostgreSQL repository persists one exact attempt against an open invo
 reservation, encrypted custody record, issued operator, and mint before creation. Only the first insert
 authorizes one POST; replay is recovery-only. One immutable outcome records either transport ambiguity
 or the initial `UNPAID` quote, and append-only observations preserve exact terms and terminal `PAID`
-history. Full requests, destinations, quote IDs, and timing remain correlation-sensitive. This boundary
-is enforced by the lifecycle repository and a database trigger: a new melt effect must match the stored
-mint, quote ID, expiry, and current `UNPAID` evidence. Later state observations do not invalidate the
-historical dispatch binding, but they also do not prove exact proof consumption.
+history. Full requests, destinations, quote IDs, and timing remain correlation-sensitive. Dispatch and
+acceptance reconstruct the complete attempt and verify its schema, request, identities, pinned profile,
+and fingerprint rather than trusting selected columns. This boundary is enforced by the lifecycle
+repository and a database trigger: a new melt effect must match the stored mint, quote ID, expiry, and
+current `UNPAID` evidence. Later state observations do not invalidate the historical dispatch binding,
+but they also do not prove exact proof consumption.
 
 A bounded Stellar execution client converts one live custody bundle into the exact custom NUT-05 melt
 body. It requires a matching unexpired `UNPAID` quote, zero fee reserve, and proof total equal to the
@@ -260,6 +272,20 @@ transport ambiguity, invalid responses, unknown results, clock disagreement, or 
 failure enter `needs_attention`. None of those paths releases proofs or permits an automatic retry, and
 `PAID` does not itself authorize consumption or merchant credit. If attention storage is unavailable,
 the already durable effect remains recovery-only rather than permitting redispatch.
+
+The separate acceptance operation requires that exact `PAID` observation and a later exact all-`SPENT`
+snapshot, derives the canonical testnet USDC asset account, and commits the paid invoice, balanced
+journal, consumed event, and current-custody deletion together. It reconstructs the full issued request
+and verifies an authenticated fingerprint over the encoded request and ordered route policy before
+trusting its settlement mode. Paid accounting and issued route rows are immutable, and multi-query
+reads use one repeatable-read snapshot. This operation remains internal: the quote request validates
+destination syntax but does not yet prove the destination came from server-owned settlement policy.
+
+The accounting migration takes access-exclusive locks in application write order before inspecting
+legacy issuance, reservations, and lifecycle history. It refuses consumed or still-active legacy
+payments and every pre-fingerprint issued request instead of inventing missing accounting, stranding
+in-flight value, or completing with unreadable invoices. Those records require retirement or an
+explicitly reviewed backfill before upgrade.
 
 A dedicated custody repository can persist the minimum spend bundle as AES-256-GCM ciphertext. It binds
 the key ID and an exact reservation fingerprint as associated data, records every 96-bit nonce in an

@@ -71,6 +71,8 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu proof-state eviden
     try {
       await pool.query(`
         TRUNCATE
+          merchant_invoice_payment_postings,
+          merchant_invoice_payment_journals,
           cashu_stellar_melt_quote_observations,
           cashu_stellar_melt_quote_outcomes,
           cashu_stellar_melt_quote_attempts,

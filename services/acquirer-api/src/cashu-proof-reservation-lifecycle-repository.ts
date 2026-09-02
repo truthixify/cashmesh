@@ -1,4 +1,11 @@
-import { assertIdentifier, type PaymentId, type UnixTimestamp } from "@cashmesh/domain";
+import {
+  type AcceptedInvoicePaymentV1,
+  assertIdentifier,
+  type JournalEntryId,
+  type MinorUnitAmount,
+  type PaymentId,
+  type UnixTimestamp,
+} from "@cashmesh/domain";
 
 declare const effectIdBrand: unique symbol;
 declare const effectFingerprintBrand: unique symbol;
@@ -82,6 +89,7 @@ export type CashuReservationLifecycleEventV1 =
   | (CashuReservationLifecycleEventBaseV1 & {
       readonly evidenceAt: UnixTimestamp;
       readonly evidenceKind: CashuOperatorSuccessEvidence;
+      readonly journalEntryId: JournalEntryId;
       readonly proofStateObservedAt: UnixTimestamp;
       readonly state: "consumed";
     })
@@ -141,10 +149,12 @@ export interface RequireCashuOperatorAttentionInput extends CashuReservationEven
   readonly reason: CashuOperatorAttentionReason;
 }
 
-export interface ConsumeCashuProofReservationInput extends CashuReservationEventInputBase {
+export interface AcceptCashuInvoicePaymentInput extends CashuReservationEventInputBase {
   readonly effectId: CashuOperatorEffectId;
   readonly evidenceAt: UnixTimestamp;
-  readonly evidenceKind: CashuOperatorSuccessEvidence;
+  readonly evidenceKind: "melt_paid";
+  readonly feeAmount: MinorUnitAmount;
+  readonly journalEntryId: JournalEntryId;
   readonly proofStateObservedAt: UnixTimestamp;
 }
 
@@ -165,9 +175,16 @@ export interface CashuProofReservationLifecycleResult {
   readonly replayed: boolean;
 }
 
+export interface AcceptCashuInvoicePaymentResult extends CashuProofReservationLifecycleResult {
+  readonly accounting: AcceptedInvoicePaymentV1;
+}
+
 export interface CashuProofReservationLifecycleRepository {
+  acceptPayment(input: AcceptCashuInvoicePaymentInput): Promise<AcceptCashuInvoicePaymentResult>;
   close(): Promise<void>;
-  consume(input: ConsumeCashuProofReservationInput): Promise<CashuProofReservationLifecycleResult>;
+  findAcceptedPaymentByPaymentId(
+    paymentId: PaymentId,
+  ): Promise<AcceptedInvoicePaymentV1 | undefined>;
   findByPaymentId(paymentId: PaymentId): Promise<CashuProofReservationLifecycleV1 | undefined>;
   recordPending(
     input: RecordCashuOperatorPendingInput,
@@ -180,6 +197,7 @@ export interface CashuProofReservationLifecycleRepository {
 }
 
 export type CashuProofReservationLifecycleRepositoryErrorCode =
+  | "accounting_conflict"
   | "effect_conflict"
   | "event_conflict"
   | "invalid_input"

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CASHU_STELLAR_METHOD,
   CASHU_STELLAR_TESTNET_NETWORK_PASSPHRASE,
@@ -15,6 +16,7 @@ import {
   createInvoiceV1,
   idempotencyKey,
   invoiceId,
+  journalEntryId,
   merchantId,
   minorUnits,
   operatorId,
@@ -24,8 +26,8 @@ import {
 import { Pool } from "pg";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  type AcceptCashuInvoicePaymentInput,
   CashuProofReservationLifecycleRepositoryError,
-  type ConsumeCashuProofReservationInput,
   cashuOperatorDispatchFingerprint,
   cashuOperatorEffectId,
   cashuOperatorReference,
@@ -69,6 +71,17 @@ const CASHU_PAYMENT_REQUEST_ISSUER = new CashuPaymentRequestIssuer({
   ],
   transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
 });
+const IMMEDIATE_CONVERSION_REQUEST_ISSUER = new CashuPaymentRequestIssuer({
+  operators: [
+    {
+      mintUrl: MINT_A,
+      operatorId: operatorId("operator-a"),
+      requestedMode: "immediate_conversion",
+      tier: "trusted",
+    },
+  ],
+  transportUrl: "https://pay.cashmesh.example/v1/cashu/payments",
+});
 
 describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecycle", () => {
   beforeAll(async () => {
@@ -83,6 +96,8 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
     try {
       await pool.query(`
         TRUNCATE
+          merchant_invoice_payment_postings,
+          merchant_invoice_payment_journals,
           cashu_stellar_melt_quote_observations,
           cashu_stellar_melt_quote_outcomes,
           cashu_stellar_melt_quote_attempts,
@@ -132,6 +147,42 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
     expect(Object.isFrozen(found?.events)).toBe(true);
     expect(JSON.stringify(found)).not.toMatch(/secret|signature|dleq|witness/i);
     await expectLifecycleCounts({ activeInvoices: 1, activeProofs: 2, effects: 1, events: 1 });
+  });
+
+  it("preserves the existing fingerprint format for non-consumed events", async () => {
+    await seedReservation();
+    const repository = await connectLifecycleRepository();
+    await repository.startEffect(startSwap());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      const result = await pool.query<{ event_fingerprint: string }>(
+        "SELECT event_fingerprint FROM cashu_proof_reservation_events WHERE event_id = $1",
+        ["event-start"],
+      );
+      const existingFormat = createHash("sha256")
+        .update(
+          JSON.stringify({
+            effectId: "effect-001",
+            eventId: "event-start",
+            evidenceAt: null,
+            evidenceKind: null,
+            paymentId: "payment-001",
+            proofStateSnapshotFingerprint: null,
+            recordedAt: RESERVED_AT + 1,
+            schemaVersion: 1,
+            sequence: 0,
+            state: "dispatch_started",
+          }),
+        )
+        .digest("hex");
+
+      expect(result.rows[0]?.event_fingerprint).toBe(existingFormat);
+      await expect(repository.findByPaymentId(paymentId("payment-001"))).resolves.toMatchObject({
+        state: "dispatch_started",
+      });
+    } finally {
+      await pool.end();
+    }
   });
 
   it("converges concurrent exact dispatch intents on one effect", async () => {
@@ -354,34 +405,70 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
     expect(released.lifecycle.state).toBe("released");
   });
 
-  it("consumes only after matching success and later exact all-SPENT evidence", async () => {
-    await seedReservation();
-    const lifecycleRepository = await connectLifecycleRepository();
-    await lifecycleRepository.startEffect(startSwap());
-    await persistProofState("SPENT", "SPENT", RESERVED_AT + 4);
+  it("accepts payment atomically after matching success and exact all-SPENT evidence", async () => {
+    const { lifecycleRepository } = await seedPayableMelt();
 
-    const consumed = await lifecycleRepository.consume(
-      consumeInput({
+    const consumed = await lifecycleRepository.acceptPayment(
+      acceptanceInput({
         evidenceAt: RESERVED_AT + 3,
+        feeAmount: 1,
         proofStateObservedAt: RESERVED_AT + 4,
         recordedAt: RESERVED_AT + 5,
       }),
     );
-    const replay = await lifecycleRepository.consume(
-      consumeInput({
+    const replay = await lifecycleRepository.acceptPayment(
+      acceptanceInput({
         evidenceAt: RESERVED_AT + 3,
+        feeAmount: 1,
         proofStateObservedAt: RESERVED_AT + 4,
         recordedAt: RESERVED_AT + 5,
       }),
     );
 
     expect(consumed.lifecycle.state).toBe("consumed");
-    expect(replay).toEqual({ lifecycle: consumed.lifecycle, replayed: true });
+    expect(consumed.accounting).toMatchObject({
+      invoice: {
+        paidAt: RESERVED_AT + 4,
+        payment: {
+          acceptedAt: RESERVED_AT + 4,
+          assetAccount: {
+            assetId: "stellar-testnet-usdc-circle",
+            kind: "settlement_asset",
+          },
+          feeAmount: 1,
+          journalEntryId: "journal-001",
+          settlementMode: "immediate_conversion",
+        },
+        state: "paid",
+      },
+      journalEntry: { effectiveAt: RESERVED_AT + 5, id: "journal-001" },
+    });
+    expect(replay).toEqual({
+      accounting: consumed.accounting,
+      lifecycle: consumed.lifecycle,
+      replayed: true,
+    });
     expect(consumed.lifecycle.events.at(-1)).toMatchObject({
-      evidenceKind: "swap_succeeded",
+      evidenceKind: "melt_paid",
+      journalEntryId: "journal-001",
       proofStateObservedAt: RESERVED_AT + 4,
       state: "consumed",
     });
+    await expect(
+      lifecycleRepository.findAcceptedPaymentByPaymentId(paymentId("payment-001")),
+    ).resolves.toEqual(consumed.accounting);
+    const invoiceRepository = await connectInvoiceRepository();
+    await expect(
+      invoiceRepository.findOpenInvoiceById(invoiceId("invoice-001")),
+    ).resolves.toBeUndefined();
+    await expect(
+      invoiceRepository.findInvoiceCreation({
+        idempotencyKey: idempotencyKey("checkout-001"),
+        merchantId: merchantId("merchant-001"),
+        requestFingerprint: createFingerprint("invoice-001"),
+      }),
+    ).resolves.toMatchObject({ invoice: { id: "invoice-001", state: "open" } });
+    await expectAccountingCounts({ journals: 1, paidInvoices: 1, postings: 3 });
     await expectLifecycleCounts({ activeInvoices: 1, activeProofs: 2, effects: 1, events: 2 });
     await expect(
       lifecycleRepository.requireAttention({
@@ -395,25 +482,299 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
     ).rejects.toMatchObject({ code: "invalid_transition" });
   });
 
-  it("rejects missing, mixed, stale, or effect-mismatched consumption evidence", async () => {
-    await seedReservation();
+  it("converges concurrent exact payment acceptance on one journal", async () => {
+    const { lifecycleRepository: firstRepository } = await seedPayableMelt();
+    const secondRepository = await connectLifecycleRepository();
+    const input = acceptanceInput();
+
+    const [first, second] = await Promise.all([
+      firstRepository.acceptPayment(input),
+      secondRepository.acceptPayment(input),
+    ]);
+
+    expect([first.replayed, second.replayed].sort()).toEqual([false, true]);
+    expect(first.accounting).toEqual(second.accounting);
+    expect(first.lifecycle).toEqual(second.lifecycle);
+    await expectAccountingCounts({ journals: 1, paidInvoices: 1, postings: 2 });
+  });
+
+  it("rejects changed accounting terms on an exact lifecycle replay", async () => {
+    const { lifecycleRepository: repository } = await seedPayableMelt();
+    await repository.acceptPayment(acceptanceInput());
+
+    await expect(repository.acceptPayment(acceptanceInput({ feeAmount: 1 }))).rejects.toMatchObject(
+      { code: "accounting_conflict" },
+    );
+    await expectAccountingCounts({ journals: 1, paidInvoices: 1, postings: 2 });
+  });
+
+  it("accounts a persisted PAID Stellar melt as immediate conversion", async () => {
+    const { lifecycleRepository } = await seedPayableMelt();
+
+    const accepted = await lifecycleRepository.acceptPayment(
+      acceptanceInput({ evidenceAt: RESERVED_AT + 3 }),
+    );
+
+    expect(accepted.accounting.invoice.payment).toMatchObject({
+      assetAccount: {
+        assetId: "stellar-testnet-usdc-circle",
+        kind: "settlement_asset",
+      },
+      settlementMode: "immediate_conversion",
+    });
+    expect(accepted.accounting.journalEntry.postings).toHaveLength(2);
+    await expectAccountingCounts({ journals: 1, paidInvoices: 1, postings: 2 });
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      const custody = await pool.query<{ count: string }>(
+        "SELECT COUNT(*) FROM cashu_bearer_proof_custody WHERE payment_id = $1",
+        ["payment-001"],
+      );
+      expect(custody.rows[0]?.count).toBe("0");
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("requires persisted PAID quote evidence and the matching issued settlement mode", async () => {
+    await seedReservation({ settlementMode: "immediate_conversion" });
+    const quoteRepository = await seedMeltQuote();
+    const repository = await connectLifecycleRepository();
+    await repository.startEffect(startMelt());
+    await persistProofState("SPENT", "SPENT", RESERVED_AT + 4);
+
+    await expect(
+      repository.acceptPayment(acceptanceInput({ evidenceAt: RESERVED_AT + 3 })),
+    ).rejects.toMatchObject({ code: "quote_evidence_missing" });
+    await quoteRepository.observe({
+      attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: meltQuote({ observedAt: RESERVED_AT + 3, state: "PENDING" }),
+    });
+    await expect(
+      repository.acceptPayment(acceptanceInput({ evidenceAt: RESERVED_AT + 3 })),
+    ).rejects.toMatchObject({ code: "quote_evidence_mismatch" });
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+  });
+
+  it.each([
+    [
+      "request",
+      "UPDATE cashu_stellar_melt_quote_attempts SET request = 'web+stellar:pay?amount=2' WHERE attempt_id = 'quote-attempt-001'",
+    ],
+    [
+      "fingerprint",
+      "UPDATE cashu_stellar_melt_quote_attempts SET attempt_fingerprint = repeat('f', 64) WHERE attempt_id = 'quote-attempt-001'",
+    ],
+  ] as const)(
+    "rejects acceptance after stored quote-attempt %s corruption",
+    async (_field, sql) => {
+      const { lifecycleRepository: repository } = await seedPayableMelt();
+      const pool = new Pool({ connectionString: requireDatabaseUrl() });
+      try {
+        await pool.query("BEGIN");
+        await pool.query(
+          "ALTER TABLE cashu_stellar_melt_quote_attempts DISABLE TRIGGER cashu_stellar_quote_attempts_append_only",
+        );
+        await pool.query(sql);
+        await pool.query(
+          "ALTER TABLE cashu_stellar_melt_quote_attempts ENABLE TRIGGER cashu_stellar_quote_attempts_append_only",
+        );
+        await pool.query("COMMIT");
+      } catch (error) {
+        await pool.query("ROLLBACK");
+        throw error;
+      } finally {
+        await pool.end();
+      }
+
+      await expect(repository.acceptPayment(acceptanceInput())).rejects.toMatchObject({
+        code: "invalid_record",
+      });
+      await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+    },
+  );
+
+  it("rejects acceptance after stored quoted-outcome fingerprint corruption", async () => {
+    const { lifecycleRepository: repository } = await seedPayableMelt();
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query(
+        "ALTER TABLE cashu_stellar_melt_quote_outcomes DISABLE TRIGGER cashu_stellar_quote_outcomes_append_only",
+      );
+      await pool.query(
+        "UPDATE cashu_stellar_melt_quote_outcomes SET outcome_fingerprint = repeat('f', 64) WHERE attempt_id = 'quote-attempt-001'",
+      );
+      await pool.query(
+        "SET CONSTRAINTS cashu_stellar_quote_outcomes_observation_required IMMEDIATE",
+      );
+      await pool.query(
+        "ALTER TABLE cashu_stellar_melt_quote_outcomes ENABLE TRIGGER cashu_stellar_quote_outcomes_append_only",
+      );
+      await pool.query("COMMIT");
+    } catch (error) {
+      await pool.query("ROLLBACK");
+      throw error;
+    } finally {
+      await pool.end();
+    }
+
+    await expect(repository.acceptPayment(acceptanceInput())).rejects.toMatchObject({
+      code: "invalid_record",
+    });
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+  });
+
+  it("rejects an observation relabeled PAID without its matching fingerprint", async () => {
+    await seedReservation({ settlementMode: "immediate_conversion" });
+    const quoteRepository = await seedMeltQuote();
+    const repository = await connectLifecycleRepository();
+    await repository.startEffect(startMelt());
+    await quoteRepository.observe({
+      attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: meltQuote({ observedAt: RESERVED_AT + 3, state: "PENDING" }),
+    });
+    await persistProofState("SPENT", "SPENT", RESERVED_AT + 4);
+
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query(
+        "ALTER TABLE cashu_stellar_melt_quote_observations DISABLE TRIGGER cashu_stellar_quote_observations_append_only",
+      );
+      await pool.query(
+        "UPDATE cashu_stellar_melt_quote_observations SET state = 'PAID' WHERE attempt_id = 'quote-attempt-001' AND observed_at = $1",
+        [RESERVED_AT + 3],
+      );
+      await pool.query("SET CONSTRAINTS cashu_stellar_quote_observations_complete IMMEDIATE");
+      await pool.query(
+        "ALTER TABLE cashu_stellar_melt_quote_observations ENABLE TRIGGER cashu_stellar_quote_observations_append_only",
+      );
+      await pool.query("COMMIT");
+    } catch (error) {
+      await pool.query("ROLLBACK");
+      throw error;
+    } finally {
+      await pool.end();
+    }
+
+    await expect(
+      repository.acceptPayment(acceptanceInput({ evidenceAt: RESERVED_AT + 3 })),
+    ).rejects.toMatchObject({ code: "invalid_record" });
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+  });
+
+  it("rejects acceptance when the stored route no longer reconstructs the issued request", async () => {
+    const { lifecycleRepository: repository } = await seedPayableMelt();
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query(
+        "ALTER TABLE invoice_cashu_request_operators DISABLE TRIGGER invoice_cashu_request_operators_append_only",
+      );
+      await pool.query(
+        "UPDATE invoice_cashu_request_operators SET mode = 'trusted_hold' WHERE invoice_id = 'invoice-001'",
+      );
+      await pool.query("SET CONSTRAINTS invoice_cashu_request_operators_required IMMEDIATE");
+      await pool.query(
+        "ALTER TABLE invoice_cashu_request_operators ENABLE TRIGGER invoice_cashu_request_operators_append_only",
+      );
+      await pool.query("COMMIT");
+    } catch (error) {
+      await pool.query("ROLLBACK");
+      throw error;
+    } finally {
+      await pool.end();
+    }
+
+    await expect(repository.acceptPayment(acceptanceInput())).rejects.toMatchObject({
+      code: "invalid_record",
+    });
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+  });
+
+  it("does not account a Stellar melt under a trusted-hold route", async () => {
+    await seedReservation({ settlementMode: "trusted_hold" });
+    const quoteRepository = await seedMeltQuote();
+    const repository = await connectLifecycleRepository();
+    await repository.startEffect(startMelt());
+    await quoteRepository.observe({
+      attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: meltQuote({ observedAt: RESERVED_AT + 3, state: "PAID" }),
+    });
+    await persistProofState("SPENT", "SPENT", RESERVED_AT + 4);
+    await expect(repository.acceptPayment(acceptanceInput())).rejects.toMatchObject({
+      code: "invalid_transition",
+    });
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+  });
+
+  it("does not accept a successful swap without durable replacement-proof custody", async () => {
+    await seedReservation({ settlementMode: "trusted_hold" });
     const repository = await connectLifecycleRepository();
     await repository.startEffect(startSwap());
+    await persistProofState("SPENT", "SPENT", RESERVED_AT + 4);
 
-    await expect(repository.consume(consumeInput())).rejects.toMatchObject({
+    await expect(
+      repository.acceptPayment({
+        ...acceptanceInput(),
+        evidenceKind: "swap_succeeded",
+      } as unknown as AcceptCashuInvoicePaymentInput),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+  });
+
+  it("does not auto-fulfill from proof evidence observed at invoice expiry", async () => {
+    const { lifecycleRepository: repository } = await seedPayableMelt({
+      paidObservedAt: EXPIRES_AT - 1,
+      proofObservedAt: EXPIRES_AT,
+    });
+
+    await expect(
+      repository.acceptPayment(
+        acceptanceInput({
+          evidenceAt: EXPIRES_AT - 1,
+          proofStateObservedAt: EXPIRES_AT,
+          recordedAt: EXPIRES_AT,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "invalid_transition" });
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+    await expect(repository.findByPaymentId(paymentId("payment-001"))).resolves.toMatchObject({
+      state: "dispatch_started",
+    });
+  });
+
+  it("rejects missing, mixed, or stale payment-acceptance evidence", async () => {
+    await seedReservation({ settlementMode: "immediate_conversion" });
+    const quoteRepository = await seedMeltQuote();
+    const repository = await connectLifecycleRepository();
+    await repository.startEffect(startMelt());
+    await quoteRepository.observe({
+      attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: meltQuote({ observedAt: RESERVED_AT + 3, state: "PAID" }),
+    });
+
+    await expect(repository.acceptPayment(acceptanceInput())).rejects.toMatchObject({
       code: "proof_state_evidence_missing",
     });
     await persistProofState("SPENT", "PENDING", RESERVED_AT + 4);
-    await expect(repository.consume(consumeInput())).rejects.toMatchObject({
+    await expect(repository.acceptPayment(acceptanceInput())).rejects.toMatchObject({
       code: "proof_state_evidence_missing",
     });
-    await expect(
-      repository.consume(consumeInput({ evidenceKind: "melt_paid" })),
-    ).rejects.toMatchObject({ code: "invalid_transition" });
     await persistProofState("SPENT", "SPENT", RESERVED_AT + 5);
+    await quoteRepository.observe({
+      attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+      paymentId: paymentId("payment-001"),
+      quote: meltQuote({ observedAt: RESERVED_AT + 6, state: "PAID" }),
+    });
     await expect(
-      repository.consume(
-        consumeInput({
+      repository.acceptPayment(
+        acceptanceInput({
           evidenceAt: RESERVED_AT + 6,
           proofStateObservedAt: RESERVED_AT + 5,
           recordedAt: RESERVED_AT + 6,
@@ -656,6 +1017,332 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu reservation lifecy
     await expectLifecycleCounts({ activeInvoices: 0, activeProofs: 2, effects: 0, events: 0 });
   });
 
+  it("rejects a paid invoice without matching consumption and accounting", async () => {
+    await seedReservation();
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query("UPDATE merchant_invoices SET state = 'paid', paid_at = $2 WHERE id = $1", [
+        "invoice-001",
+        RESERVED_AT + 2,
+      ]);
+      const error = await errorFromAsync(() => pool.query("COMMIT"));
+      expect(error).toMatchObject({ code: "23514" });
+      await pool.query("ROLLBACK");
+      const invoice = await pool.query<{ paid_at: string | null; state: string }>(
+        "SELECT state, paid_at FROM merchant_invoices WHERE id = $1",
+        ["invoice-001"],
+      );
+      expect(invoice.rows[0]).toEqual({ paid_at: null, state: "open" });
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("rejects a directly inserted paid invoice without matching accounting", async () => {
+    await seedReservation();
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query(
+        `
+          INSERT INTO merchant_invoices (
+            id, merchant_id, schema_version, unit, amount, created_at, expires_at, state, paid_at
+          )
+          VALUES ('invoice-direct-paid', 'merchant-001', 1, 'usdc', 2, $1, $2, 'paid', $3)
+        `,
+        [CREATED_AT, EXPIRES_AT, RESERVED_AT + 2],
+      );
+      await pool.query(`
+        INSERT INTO invoice_cashu_requests (
+          invoice_id,
+          merchant_id,
+          schema_version,
+          encoded_request,
+          encoding,
+          issued_at,
+          mint_policy,
+          operator_count,
+          route_set_fingerprint,
+          transport_url
+        )
+        SELECT
+          'invoice-direct-paid',
+          merchant_id,
+          schema_version,
+          encoded_request,
+          encoding,
+          issued_at,
+          mint_policy,
+          operator_count,
+          route_set_fingerprint,
+          transport_url
+        FROM invoice_cashu_requests
+        WHERE invoice_id = 'invoice-001'
+      `);
+      await pool.query(`
+        INSERT INTO invoice_cashu_request_operators (
+          invoice_id, merchant_id, position, operator_id, mint_url, mode, tier, reason
+        )
+        SELECT
+          'invoice-direct-paid', merchant_id, position, operator_id, mint_url, mode, tier, reason
+        FROM invoice_cashu_request_operators
+        WHERE invoice_id = 'invoice-001'
+      `);
+
+      const error = await errorFromAsync(() => pool.query("COMMIT"));
+      expect(error).toMatchObject({ code: "23514" });
+      await pool.query("ROLLBACK");
+    } finally {
+      await pool.end();
+    }
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+  });
+
+  it("rolls back an incomplete payment journal below the repository", async () => {
+    const { lifecycleRepository: repository } = await seedPayableMelt();
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      const observation = await pool.query<{ snapshot_fingerprint: string }>(
+        `
+          SELECT snapshot_fingerprint
+          FROM cashu_proof_state_observations
+          WHERE payment_id = $1 AND observed_at = $2
+        `,
+        ["payment-001", RESERVED_AT + 4],
+      );
+      const snapshotFingerprint = observation.rows[0]?.snapshot_fingerprint;
+      if (snapshotFingerprint === undefined) {
+        throw new Error("Expected persisted proof-state evidence.");
+      }
+      await pool.query("BEGIN");
+      await pool.query(
+        `
+          INSERT INTO merchant_invoice_payment_journals (
+            journal_entry_id,
+            journal_fingerprint,
+            invoice_id,
+            merchant_id,
+            payment_id,
+            operator_id,
+            mint_url,
+            settlement_mode,
+            asset_account_kind,
+            asset_account_id,
+            schema_version,
+            accepted_at,
+            effective_at,
+            gross_amount,
+            fee_amount,
+            net_amount
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, 2, 0, 2)
+        `,
+        [
+          "raw-journal",
+          "a".repeat(64),
+          "invoice-001",
+          "merchant-001",
+          "payment-001",
+          "operator-a",
+          MINT_A,
+          "immediate_conversion",
+          "settlement_asset",
+          "stellar-testnet-usdc-circle",
+          RESERVED_AT + 4,
+          RESERVED_AT + 5,
+        ],
+      );
+      await pool.query(
+        `
+          INSERT INTO merchant_invoice_payment_postings (
+            journal_entry_id, position, side, account_kind, account_id, amount
+          )
+          VALUES (
+            'raw-journal',
+            0,
+            'debit',
+            'settlement_asset',
+            'stellar-testnet-usdc-circle',
+            2
+          )
+        `,
+      );
+      await pool.query("UPDATE merchant_invoices SET state = 'paid', paid_at = $2 WHERE id = $1", [
+        "invoice-001",
+        RESERVED_AT + 4,
+      ]);
+      await pool.query(
+        `
+          INSERT INTO cashu_proof_reservation_events (
+            event_id,
+            event_fingerprint,
+            payment_id,
+            sequence,
+            schema_version,
+            state,
+            recorded_at,
+            effect_id,
+            evidence_kind,
+            evidence_at,
+            journal_entry_id,
+            proof_state_snapshot_fingerprint
+          )
+          VALUES ($1, $2, $3, 1, 1, 'consumed', $4, $5, 'melt_paid', $6, $7, $8)
+        `,
+        [
+          "raw-consume",
+          "b".repeat(64),
+          "payment-001",
+          RESERVED_AT + 5,
+          "effect-001",
+          RESERVED_AT + 3,
+          "raw-journal",
+          snapshotFingerprint,
+        ],
+      );
+
+      const error = await errorFromAsync(() => pool.query("COMMIT"));
+      expect(error).toMatchObject({ code: "23514" });
+      await pool.query("ROLLBACK");
+      const custody = await pool.query<{
+        ciphertext_hex: string;
+        record_fingerprint: string;
+      }>(
+        `
+          SELECT record_fingerprint, encode(ciphertext, 'hex') AS ciphertext_hex
+          FROM cashu_bearer_proof_custody
+          WHERE payment_id = $1
+        `,
+        ["payment-001"],
+      );
+      expect(custody.rows).toEqual([
+        {
+          ciphertext_hex: "09",
+          record_fingerprint: createFingerprint("custody-record"),
+        },
+      ]);
+    } finally {
+      await pool.end();
+    }
+    await expectAccountingCounts({ journals: 0, paidInvoices: 0, postings: 0 });
+    await expect(repository.findByPaymentId(paymentId("payment-001"))).resolves.toMatchObject({
+      state: "dispatch_started",
+    });
+  });
+
+  it("rolls back reordered payment postings below the repository", async () => {
+    const { lifecycleRepository: repository } = await seedPayableMelt();
+    await repository.acceptPayment(acceptanceInput());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await pool.query("BEGIN");
+      await pool.query(
+        "ALTER TABLE merchant_invoice_payment_postings DISABLE TRIGGER merchant_invoice_payment_postings_append_only",
+      );
+      await pool.query(
+        "DELETE FROM merchant_invoice_payment_postings WHERE journal_entry_id = $1",
+        ["journal-001"],
+      );
+      await pool.query(
+        `
+          INSERT INTO merchant_invoice_payment_postings (
+            journal_entry_id, position, side, account_kind, account_id, amount
+          )
+          VALUES
+            ('journal-001', 0, 'credit', 'merchant_payable', 'merchant-001', 2),
+            (
+              'journal-001',
+              1,
+              'debit',
+              'settlement_asset',
+              'stellar-testnet-usdc-circle',
+              2
+            )
+        `,
+      );
+      const error = await errorFromAsync(() => pool.query("COMMIT"));
+      expect(error).toMatchObject({ code: "23514" });
+      await pool.query("ROLLBACK");
+    } finally {
+      await pool.end();
+    }
+    await expectAccountingCounts({ journals: 1, paidInvoices: 1, postings: 2 });
+    await expect(
+      repository.findAcceptedPaymentByPaymentId(paymentId("payment-001")),
+    ).resolves.toMatchObject({ journalEntry: { id: "journal-001" } });
+  });
+
+  it("keeps paid accounting immutable and fails closed on tampered postings", async () => {
+    const { lifecycleRepository: repository } = await seedPayableMelt();
+    await repository.acceptPayment(acceptanceInput());
+    const pool = new Pool({ connectionString: requireDatabaseUrl() });
+    try {
+      await expect(
+        pool.query(
+          "UPDATE merchant_invoice_payment_journals SET fee_amount = 1 WHERE payment_id = $1",
+          ["payment-001"],
+        ),
+      ).rejects.toMatchObject({ code: "55000" });
+      await expect(
+        pool.query(
+          "UPDATE merchant_invoice_payment_postings SET amount = 1 WHERE journal_entry_id = $1",
+          ["journal-001"],
+        ),
+      ).rejects.toMatchObject({ code: "55000" });
+      await expect(
+        pool.query("UPDATE merchant_invoices SET paid_at = paid_at + 1 WHERE id = $1", [
+          "invoice-001",
+        ]),
+      ).rejects.toMatchObject({ code: "55000" });
+      await expect(
+        pool.query(
+          "UPDATE invoice_cashu_request_operators SET mode = 'trusted_hold' WHERE invoice_id = $1",
+          ["invoice-001"],
+        ),
+      ).rejects.toMatchObject({ code: "55000" });
+
+      await pool.query(
+        "ALTER TABLE merchant_invoice_payment_journals DISABLE TRIGGER merchant_invoice_payment_journals_append_only",
+      );
+      try {
+        await expect(
+          pool.query(
+            "UPDATE merchant_invoice_payment_journals SET asset_account_id = 'unrelated-asset' WHERE payment_id = $1",
+            ["payment-001"],
+          ),
+        ).rejects.toMatchObject({ code: "23514" });
+      } finally {
+        await pool.query(
+          "ALTER TABLE merchant_invoice_payment_journals ENABLE TRIGGER merchant_invoice_payment_journals_append_only",
+        );
+      }
+
+      await pool.query(
+        "ALTER TABLE merchant_invoice_payment_postings DISABLE TRIGGER merchant_invoice_payment_postings_append_only",
+      );
+      try {
+        await pool.query(
+          "UPDATE merchant_invoice_payment_postings SET amount = 1 WHERE journal_entry_id = $1 AND position = 0",
+          ["journal-001"],
+        );
+      } finally {
+        await pool.query(
+          "ALTER TABLE merchant_invoice_payment_postings ENABLE TRIGGER merchant_invoice_payment_postings_append_only",
+        );
+      }
+    } finally {
+      await pool.end();
+    }
+
+    await expect(
+      repository.findAcceptedPaymentByPaymentId(paymentId("payment-001")),
+    ).rejects.toMatchObject({ code: "invalid_record" });
+    await expect(repository.findByPaymentId(paymentId("payment-001"))).rejects.toMatchObject({
+      code: "invalid_record",
+    });
+  });
+
   it("rejects mutation and fails closed on corrupted lifecycle fingerprints", async () => {
     await seedReservation();
     const repository = await connectLifecycleRepository();
@@ -723,6 +1410,7 @@ async function seedReservation(overrides: ReservationOverrides = {}) {
   await seedInvoice(
     overrides.invoiceId ?? "invoice-001",
     `checkout-${overrides.invoiceId ?? "001"}`,
+    overrides.settlementMode,
   );
   await seedKeyset();
   const repository = await connectReservationRepository();
@@ -733,9 +1421,12 @@ async function seedReservation(overrides: ReservationOverrides = {}) {
 async function seedInvoice(
   requestedInvoiceId = "invoice-001",
   requestedIdempotencyKey = "checkout-001",
+  settlementMode: "immediate_conversion" | "trusted_hold" = "trusted_hold",
 ): Promise<void> {
   const repository = await connectInvoiceRepository();
-  await repository.createOpenInvoice(invoiceRecord(requestedInvoiceId, requestedIdempotencyKey));
+  await repository.createOpenInvoice(
+    invoiceRecord(requestedInvoiceId, requestedIdempotencyKey, settlementMode),
+  );
 }
 
 async function seedKeyset(): Promise<void> {
@@ -774,6 +1465,27 @@ async function seedMeltQuote(): Promise<PostgresCashuStellarMeltQuoteRepository>
     quote: meltQuote(),
   });
   return repository;
+}
+
+async function seedPayableMelt(
+  options: { readonly paidObservedAt?: number; readonly proofObservedAt?: number } = {},
+): Promise<{
+  readonly lifecycleRepository: PostgresCashuProofReservationLifecycleRepository;
+  readonly quoteRepository: PostgresCashuStellarMeltQuoteRepository;
+}> {
+  const paidObservedAt = options.paidObservedAt ?? RESERVED_AT + 3;
+  const proofObservedAt = options.proofObservedAt ?? RESERVED_AT + 4;
+  await seedReservation({ settlementMode: "immediate_conversion" });
+  const quoteRepository = await seedMeltQuote();
+  const lifecycleRepository = await connectLifecycleRepository();
+  await lifecycleRepository.startEffect(startMelt());
+  await quoteRepository.observe({
+    attemptId: cashuStellarMeltQuoteAttemptId("quote-attempt-001"),
+    paymentId: paymentId("payment-001"),
+    quote: meltQuote({ observedAt: paidObservedAt, state: "PAID" }),
+  });
+  await persistProofState("SPENT", "SPENT", proofObservedAt);
+  return { lifecycleRepository, quoteRepository };
 }
 
 async function seedOpaqueCustody(): Promise<void> {
@@ -908,6 +1620,7 @@ async function closeRepository(repository: { close(): Promise<void> }): Promise<
 function invoiceRecord(
   requestedInvoiceId: string,
   requestedIdempotencyKey: string,
+  settlementMode: "immediate_conversion" | "trusted_hold" = "trusted_hold",
 ): CreateOpenInvoiceRecord {
   const ownerId = merchantId("merchant-001");
   const invoice = createInvoiceV1({
@@ -918,7 +1631,10 @@ function invoiceRecord(
     merchantId: ownerId,
   });
   return {
-    cashuPaymentRequest: CASHU_PAYMENT_REQUEST_ISSUER.issue({
+    cashuPaymentRequest: (settlementMode === "trusted_hold"
+      ? CASHU_PAYMENT_REQUEST_ISSUER
+      : IMMEDIATE_CONVERSION_REQUEST_ISSUER
+    ).issue({
       invoice,
       issuedAt: invoice.createdAt,
     }),
@@ -932,6 +1648,7 @@ interface ReservationOverrides {
   readonly invoiceId?: string;
   readonly paymentId?: string;
   readonly proofReferences?: ReserveCashuProofsInput["proofReferences"];
+  readonly settlementMode?: "immediate_conversion" | "trusted_hold";
 }
 
 function reservationInput(overrides: ReservationOverrides = {}): ReserveCashuProofsInput {
@@ -1018,17 +1735,20 @@ function stellarPaymentRequest(amount: number): string {
 
 interface TerminalOverrides {
   readonly evidenceAt?: number;
-  readonly evidenceKind?: "swap_succeeded" | "melt_paid";
+  readonly feeAmount?: number;
+  readonly journalEntryId?: string;
   readonly proofStateObservedAt?: number;
   readonly recordedAt?: number;
 }
 
-function consumeInput(overrides: TerminalOverrides = {}): ConsumeCashuProofReservationInput {
+function acceptanceInput(overrides: TerminalOverrides = {}): AcceptCashuInvoicePaymentInput {
   return {
     effectId: cashuOperatorEffectId("effect-001"),
     eventId: cashuReservationLifecycleEventId("event-consume"),
     evidenceAt: unixTimestamp(overrides.evidenceAt ?? RESERVED_AT + 3),
-    evidenceKind: overrides.evidenceKind ?? "swap_succeeded",
+    evidenceKind: "melt_paid",
+    feeAmount: minorUnits(overrides.feeAmount ?? 0),
+    journalEntryId: journalEntryId(overrides.journalEntryId ?? "journal-001"),
     paymentId: paymentId("payment-001"),
     proofStateObservedAt: unixTimestamp(overrides.proofStateObservedAt ?? RESERVED_AT + 4),
     recordedAt: unixTimestamp(overrides.recordedAt ?? RESERVED_AT + 5),
@@ -1081,6 +1801,33 @@ function proofReference(y: string) {
 
 function createFingerprint(value: string): string {
   return Buffer.from(value).toString("hex").padEnd(64, "0").slice(0, 64);
+}
+
+async function expectAccountingCounts(expected: {
+  readonly journals: number;
+  readonly paidInvoices: number;
+  readonly postings: number;
+}): Promise<void> {
+  const pool = new Pool({ connectionString: requireDatabaseUrl() });
+  try {
+    const result = await pool.query<{
+      journals: string;
+      paid_invoices: string;
+      postings: string;
+    }>(`
+      SELECT
+        (SELECT COUNT(*) FROM merchant_invoice_payment_journals) AS journals,
+        (SELECT COUNT(*) FROM merchant_invoice_payment_postings) AS postings,
+        (SELECT COUNT(*) FROM merchant_invoices WHERE state = 'paid') AS paid_invoices
+    `);
+    expect(result.rows[0]).toEqual({
+      journals: String(expected.journals),
+      paid_invoices: String(expected.paidInvoices),
+      postings: String(expected.postings),
+    });
+  } finally {
+    await pool.end();
+  }
 }
 
 async function expectLifecycleCounts(expected: {
