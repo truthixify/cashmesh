@@ -39,9 +39,11 @@ security, legal, liquidity, and partner evidence.
 - Implemented: bounded, unit-scoped NUT-01/02 observation with stable two-pass metadata reads.
 - Implemented: durable keyset identity, collision history, observation replay, and freshness lookup.
 - Implemented: durable local proof-reference reservation with restart and concurrency safety.
-- Remaining: reservation lifecycle plus atomic paid-invoice and balanced-journal persistence.
+- Implemented: bounded, same-order NUT-07 proof-state observation without witness retention.
+- Remaining: durable proof-state evidence and reservation lifecycle plus atomic paid-invoice and
+  balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
-- Remaining: protected-mint authentication, NUT-07 state, spending conditions, and redemption.
+- Remaining: protected-mint authentication, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.
 - Receipts, refund records, webhooks, accounting export, and manual attention.
 

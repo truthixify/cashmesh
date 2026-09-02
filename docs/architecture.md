@@ -54,8 +54,10 @@ performing network I/O during proof validation. A separate source port and bound
 collect one unit's NUT-01 and NUT-02 data, reject a rotation between two metadata reads, and pass the
 joined result through the same snapshot validator. It owns Cashu wire encoding, endpoint normalization,
 transport-size limits, versioned policy records, and derivation of sanitized NUT-07 proof references.
-It does not persist snapshots or references, observe spent state, or decide that an invoice has been
-paid.
+A second source port and bounded HTTPS adapter can query NUT-07 with only those references, enforce an
+exact ordered response, discard witnesses, and return an immutable in-memory state snapshot. It does
+not persist or schedule state observations, change proof reservations, perform operator effects, or
+decide that an invoice has been paid.
 
 The adapter pins a current release-candidate cashu-ts version behind this boundary. Its deterministic
 `creqA` fixture is decoded by both cashu-ts and the independently pinned CDK types. See the
@@ -224,3 +226,4 @@ justify it.
 - [ADR-0011: Bounded Cashu keyset observation](adr/0011-observe-cashu-keysets.md)
 - [ADR-0012: Durable Cashu keyset evidence](adr/0012-persist-cashu-keyset-evidence.md)
 - [ADR-0013: Durable Cashu proof references](adr/0013-reserve-cashu-proof-references.md)
+- [ADR-0014: Bounded Cashu proof-state observation](adr/0014-observe-cashu-proof-state.md)

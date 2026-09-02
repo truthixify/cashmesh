@@ -31,6 +31,18 @@ export {
   MAX_CASHU_KEYSET_REQUEST_TIMEOUT_MS,
   MAX_CASHU_KEYSET_RESPONSE_BYTES,
 } from "./mint-keyset-http-client";
+export {
+  CashuMintProofStateHttpClient,
+  type CashuMintProofStateHttpClientOptions,
+  CashuMintProofStateHttpError,
+  type CashuMintProofStateHttpErrorCode,
+  type CashuMintProofStateSource,
+  type CashuProofStateReadOptions,
+  DEFAULT_CASHU_PROOF_STATE_REQUEST_TIMEOUT_MS,
+  DEFAULT_CASHU_PROOF_STATE_RESPONSE_BYTES,
+  MAX_CASHU_PROOF_STATE_REQUEST_TIMEOUT_MS,
+  MAX_CASHU_PROOF_STATE_RESPONSE_BYTES,
+} from "./mint-proof-state-http-client";
 export { MAX_CASHU_ENDPOINT_LENGTH, normalizeCashuMintUrl } from "./mint-url";
 export {
   type CashuPaymentPayloadEnvelopeV1,
@@ -65,5 +77,26 @@ export {
   CashuProofReferenceError,
   type CashuProofReferenceInputV1,
   type CashuProofReferenceV1,
+  type CashuProofY,
+  cashuProofY,
   createCashuProofReferenceV1,
 } from "./proof-reference";
+export {
+  CASHU_PROOF_STATE_SNAPSHOT_SCHEMA_VERSION,
+  type CashuProofStateEntryInputV1,
+  type CashuProofStateEntryV1,
+  CashuProofStateSnapshotError,
+  type CashuProofStateSnapshotErrorCode,
+  type CashuProofStateSnapshotV1,
+  type CashuProofStateValue,
+  type CreateCashuProofStateSnapshotInputV1,
+  createCashuProofStateSnapshotV1,
+  MAX_CASHU_PROOF_STATES_PER_SNAPSHOT,
+} from "./proof-state";
+export {
+  CashuProofStateObservationError,
+  type CashuProofStateObservationErrorCode,
+  CashuProofStateObserver,
+  type CashuProofStateObserverOptions,
+  type ObserveCashuProofStatesInput,
+} from "./proof-state-observer";

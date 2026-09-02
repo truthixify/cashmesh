@@ -79,6 +79,7 @@ of Cashu or Stellar implementations.
 | Oversized or imprecise proof payload | Resource exhaustion or wrong amount comparison | Raw JSON byte/proof caps and exact integer decoding before policy lookup |
 | Forged keyset, signature, or denomination | Crediting counterfeit operator liability | Recomputed keyset IDs, validated public points, strict DLEQ, and exact key lookup |
 | Oversized, redirected, or stalled keyset endpoint | Resource exhaustion or observation of the wrong host | Exact configured HTTPS paths, no redirects or credentials, response/time limits, and bounded concurrency |
+| Malformed, redirected, or stalled proof-state endpoint | False state evidence, resource exhaustion, or observation by the wrong host | Exact configured HTTPS path, no redirects or credentials, response/time limits, and exact ordered `Y` binding |
 | Key rotation during observation | Inconsistent activity, fee, expiry, and public-key evidence | Two matching metadata reads around unit-scoped key collection |
 | Historical keyset ID reuse | Substituted keys, unit, fee, or expiry after prior acceptance | Cross-operator immutable identity fingerprints and append-only observations |
 | Duplicate proof inside one payload | Inflated gross amount | Reject duplicate secrets before amount or fee acceptance |
@@ -101,8 +102,8 @@ CashMesh does not hide everything:
 - Operators see quote amount, time, completion, and redemption details.
 - The acquirer sees merchant, invoice, amount, operator, and settlement state.
 - A NUT-18 request reveals its invoice identifier, amount, accepted mints, and transport endpoint.
-- Stored NUT-07 `Y` references can correlate repeated presentation attempts even though they cannot
-  spend a proof.
+- Stored or mint-queried NUT-07 `Y` references can correlate presentation attempts and queried proof
+  groups even though they cannot spend a proof.
 - Network and application metadata can correlate parties.
 - Exact amounts and timing can correlate entry and exit.
 - Stablecoin issuer controls remain in force.
@@ -158,10 +159,11 @@ data for one unit from a server-configured HTTPS host and rejects metadata that 
 read. HTTPS does not make the result a signed operator statement. A separate PostgreSQL repository
 stores append-only identities and observations, rejects historical version `00` unit, fee, or expiry
 changes across operators, and requires callers to provide inclusive freshness bounds. It has no
-automatic observer schedule and is not connected to payment acceptance. Offline validation cannot
-establish NUT-07 state, and NUT-21 and NUT-22 credentials are not handled. The adapter and keyset store
-return no bearer fields. A received NUT-12 blinding factor must never be logged, persisted outside
-encrypted proof custody, or forwarded to the mint, where it would reveal an issuance-to-spend link.
+automatic observer schedule and is not connected to payment acceptance. Offline validation alone
+cannot establish NUT-07 state, and NUT-21 and NUT-22 credentials are not handled. The adapter and
+keyset store return no bearer fields. A received NUT-12 blinding factor must never be logged, persisted
+outside encrypted proof custody, or forwarded to the mint, where it would reveal an issuance-to-spend
+link.
 
 After offline validation, a separate repository can reserve only `Y`, keyset ID, and amount. The
 reservation is bound to an issued invoice/operator/mint route and exact keyset observation, commits all
@@ -169,6 +171,13 @@ proof references atomically, and makes `(mint URL, Y)` unique across payments. I
 secret, signature, DLEQ value, witness, memo, or raw payload. It is append-only and has no release,
 consumption, NUT-07, operator-effect, invoice-transition, journal, or HTTP-success behavior. `Y` remains
 correlation-sensitive and is excluded from telemetry and merchant-facing responses.
+
+A separate bounded observer can send only reserved-style `Y` references to one configured mint's
+NUT-07 endpoint and return an in-memory `UNSPENT`, `PENDING`, or `SPENT` snapshot. It enforces exact
+response order and cardinality and discards any witness, but the query itself discloses the grouped
+references and timing to that mint. The snapshot is not persisted or wired to reservation transitions;
+it is an operator assertion that can become stale immediately and cannot establish payment, solvency,
+or a safe release after ambiguity.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

@@ -171,9 +171,27 @@ proof reference. The header and all references commit together, remain append-on
 contain no secret, signature, DLEQ value, witness, memo, or raw payload.
 
 This is a sticky local lock, not a payment state. It has no release or consumption transition, does not
-call NUT-07 or an operator, does not retain spendable proof material, and cannot change an invoice or
-enable HTTP success. `Y` is non-spendable but correlation-sensitive and must not enter logs, metrics,
-support artifacts, or merchant responses.
+call an operator, does not retain spendable proof material, and cannot change an invoice or enable HTTP
+success. `Y` is non-spendable but correlation-sensitive and must not enter logs, metrics, support
+artifacts, or merchant responses.
+
+## Proof-State Observation
+
+`CashuProofStateObserver` can query a configured mint for the NUT-07 state of previously sanitized
+proof references. Its concrete HTTPS client sends one bounded, credential-free `POST /v1/checkstate`
+containing only a sorted set of at most 128 `Y` values. It disables redirects, cache reuse, referrer
+metadata, and ambient credentials, applies time and response-size limits, and performs no automatic
+retry.
+
+The observer requires exactly one same-order response for every requested `Y` and accepts only
+`UNSPENT`, `PENDING`, or `SPENT`. It validates the optional witness field but discards its value before
+constructing an immutable snapshot timestamped at completion. It does not persist the snapshot or wire
+it into the payment endpoint, reservation lifecycle, redemption, invoice state, or accounting.
+
+This read reveals the queried `Y` grouping and timing to the mint. The result is the mint's current
+assertion, not proof of honesty, solvency, future unspentness, successful redemption, or merchant
+payment. In particular, `UNSPENT` can become stale immediately and `PENDING` cannot authorize release
+of a local reservation.
 
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
@@ -191,8 +209,9 @@ precision-preserving envelope parsing, stored-request binding, rejection behavio
 they do not prove wallet QR scanning, proof validity, DLEQ verification, input-fee calculation,
 operator redemption, or merchant settlement. Separate proof tests cover an official NUT-12 vector,
 deterministic generated proofs, mixed-keyset fees, expiry, duplicates, and malformed evidence. Keyset
-observer tests cover stable two-pass metadata, unit filtering, concurrency, response bounds, transport
-timeouts, and failure paths entirely through local fixtures. PostgreSQL tests cover restart,
+and proof-state observer tests cover stable metadata, exact request/response binding, unit filtering,
+concurrency, response bounds, transport timeouts, and failure paths entirely through local fixtures.
+PostgreSQL tests cover restart,
 historical collision rejection, freshness bounds, exact keyset-observation binding, concurrent replay,
 proof-reference exclusion, append-only enforcement, rollback, and stored-record corruption. They do not
 prove endpoint authenticity, an appropriate production freshness policy, unspentness, redemption, or
