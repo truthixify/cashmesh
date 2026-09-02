@@ -37,6 +37,7 @@ export type CashuProofReservationRepositoryErrorCode =
   | "keyset_evidence_missing"
   | "payment_conflict"
   | "proof_conflict"
+  | "reservation_released"
   | "reservation_window_closed"
   | "route_not_accepted"
   | "storage_unavailable";

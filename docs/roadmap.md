@@ -42,7 +42,10 @@ security, legal, liquidity, and partner evidence.
 - Implemented: bounded, same-order NUT-07 proof-state observation without witness retention.
 - Implemented: payment-scoped, durable proof-state evidence with explicit freshness and terminal
   `SPENT` history.
-- Remaining: reservation lifecycle plus atomic paid-invoice and balanced-journal persistence.
+- Implemented: durable proof-reservation lifecycle with exact dispatch binding, conservative
+  ambiguity, proof-state-gated consumption, and evidence-gated release.
+- Remaining: encrypted bearer custody, bounded swap/melt dispatch, and atomic paid-invoice plus
+  balanced-journal persistence.
 - Remaining: verified NUT-18 payment acceptance and advisory mint support after catch-all conversion.
 - Remaining: protected-mint authentication, spending conditions, and redemption.
 - Trusted-hold and immediate-conversion settlement.

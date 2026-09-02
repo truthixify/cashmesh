@@ -1,13 +1,14 @@
 # Merchant Invoice API
 
-**Status:** Open-invoice issuance, internal proof-reference reservation, and proof-state evidence
-implemented; payment acceptance not implemented
+**Status:** Open-invoice issuance, internal Cashu evidence, and proof-reservation lifecycle implemented;
+payment acceptance not implemented
 
 The acquirer API persists version `1` USDC invoices in PostgreSQL and requires a merchant-scoped
 idempotency key for every creation request. It can inspect and bind a NUT-18 payment envelope, but it
 does not yet authenticate merchants, validate proofs in the HTTP path, or transition invoices out of
-`open`. Separate repositories can reserve sanitized proof references after offline validation and
-persist matching NUT-07 state evidence; neither is connected to the public endpoint.
+`open`. Separate repositories can reserve sanitized proof references after offline validation, persist
+matching NUT-07 state evidence, and manage a conservative reservation lifecycle; none is connected to
+the public endpoint or an operator dispatch adapter.
 
 ## Create an Invoice
 
@@ -154,10 +155,10 @@ A matching envelope returns `503 proof_validation_unavailable`; no proof is stor
 or submitted to an operator.
 
 The Cashu package has a deterministic offline proof validator and bounded NUT-07 observer. Separate
-acquirer repositories can load explicit keyset observations, reserve sanitized proof references, and
-persist exact payment-scoped proof-state evidence. The HTTP service does not orchestrate them and has
-no reservation lifecycle. Those internal capabilities are therefore intentionally not enough to change
-the endpoint response.
+acquirer repositories can load explicit keyset observations, reserve sanitized proof references,
+persist exact payment-scoped proof-state evidence, and manage lifecycle claims. The HTTP service does
+not orchestrate them and no component retains or dispatches bearer proofs. Those internal capabilities
+are therefore intentionally not enough to change the endpoint response.
 
 | Status | Meaning |
 |---:|---|
@@ -197,22 +198,26 @@ The invoice, Cashu request, keyset-evidence, proof-reference, and proof-state mi
   amount checks;
 - one append-only proof-state snapshot per payment and observation time, bound to that reservation's
   exact scope and complete `Y` set; and
-- terminal `SPENT` history, including observations inserted out of timestamp order.
+- terminal `SPENT` history, including observations inserted out of timestamp order;
+- one immutable operator effect per payment, with exact dispatch and melt-quote identity;
+- append-only reservation transitions with exact replay and conservative ambiguity; and
+- active proof and invoice claims removed only by an evidence-valid release.
 
-Keyset, proof-reference, and proof-state persistence are separate repository capabilities. Invoice
-issuance and HTTP payment intake do not automatically observe a mint, select a freshness interval, load
-a stored snapshot, create a reservation, or interpret state evidence. The reservation stores `Y`,
-keyset ID, and amount; state evidence stores `Y` and the mint-asserted enum. Neither stores the proof
-secret, signature, DLEQ values, witness, memo, or raw payload.
+Keyset, proof-reference, proof-state, and lifecycle persistence are separate repository capabilities.
+Invoice issuance and HTTP payment intake do not automatically observe a mint, select a freshness
+interval, load a stored snapshot, create a reservation, dispatch an effect, or interpret evidence. The
+reservation stores `Y`, keyset ID, and amount; state evidence stores `Y` and the mint-asserted enum;
+lifecycle history stores sanitized effect identities and outcomes. None stores the proof secret,
+signature, DLEQ values, witness, memo, token, or raw payload.
 
 The Cashu request migration refuses an invoice-only database that already contains invoice rows. A
 historical mint allowlist and transport cannot be inferred from an invoice, so deployment requires an
 explicit reviewed backfill or retirement of local-only legacy records before upgrade.
 
 Supporting `paid`, `expired`, or `cancelled` records requires a new migration with state-specific fields
-and checks. In particular, payment acceptance must atomically consume the appropriate reservation,
-write the paid invoice and balanced journal, and record operator evidence; the current append-only local
-lock does not satisfy that later accounting boundary.
+and checks. In particular, payment acceptance must atomically connect confirmed reservation
+consumption to the paid invoice and balanced journal; durable lifecycle evidence alone does not satisfy
+that accounting boundary.
 
 ## Error and Privacy Boundary
 

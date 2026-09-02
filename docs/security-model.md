@@ -54,6 +54,11 @@ of Cashu or Stellar implementations.
 - An issued invoice, encoded request, transport, and operator-policy snapshot commit atomically.
 - An unverified payment envelope never returns success, reserves value, or changes invoice state.
 - Offline proof integrity never substitutes for mint-observed unspent state or durable reservation.
+- One canonical dispatch fingerprint is bound to at most one local effect for a mint and effect kind.
+- Ambiguous operator evidence never releases proof or invoice claims.
+- Post-dispatch release requires a matching terminal failure and a later exact all-`UNSPENT` snapshot.
+- A melt cannot be released as unpaid before its bound quote expires.
+- Consumption requires matching success and a later exact all-`SPENT` snapshot.
 - Merchant balances reconcile to immutable invoice and settlement references.
 - Reserve visibility and redemption probes never become a solvency guarantee.
 
@@ -66,6 +71,8 @@ of Cashu or Stellar implementations.
 | Partial or rounded payment | Accounting loss | Integer quote amount and exact comparison |
 | Duplicate payout after timeout | Reserve loss | Persisted exact envelope/hash, dispatch intent, observe-before-retry |
 | Proof release after ambiguous effect | Double redemption | `needs_attention` state and proof reservation |
+| One outbound operation bound to multiple payments | Conflicting recovery and double fulfillment | Unique mint, effect-kind, and dispatch-fingerprint binding |
+| Melt released while its quote remains payable | Double redemption | Bound quote expiry plus post-expiry `UNPAID` and later all-`UNSPENT` evidence |
 | Dishonest or insolvent operator | Merchant loss | Per-operator tiers, caps, conversion policy, suspension, diversification |
 | Forged merchant callback | Fulfillment without payment | Signed/replay-protected webhooks and merchant-side verification |
 | Cashier account compromise | Fraudulent invoice or refund | Least privilege, location scope, audit log, strong authentication |
@@ -132,10 +139,11 @@ deployment gates, not optional hardening.
 
 ## Acquirer Database Boundary
 
-PostgreSQL now stores open invoices, idempotency fingerprints, public Cashu keyset evidence, and
-non-spendable proof references. Database constraints repeat identifier, amount, unit, schema, ownership,
-expiry-shape, and evidence-cardinality invariants. Concurrent invoice creation is serialized by a
-unique merchant/key reservation, and invoice plus reservation commit together.
+PostgreSQL now stores open invoices, idempotency fingerprints, public Cashu keyset evidence,
+non-spendable proof references, proof-state evidence, and reservation lifecycle history. Database
+constraints repeat identifier, amount, unit, schema, ownership, expiry-shape, evidence-cardinality,
+transition, and active-claim invariants. Concurrent invoice creation is serialized by a unique
+merchant/key reservation, and invoice plus reservation commit together.
 
 The same transaction stores the strict Cashu request and one through 16 operator routes. Deferred
 constraints prevent a request with no accepted route. Reads reconstruct the request through the pinned
@@ -168,9 +176,8 @@ link.
 
 After offline validation, a separate repository can reserve only `Y`, keyset ID, and amount. The
 reservation is bound to an issued invoice/operator/mint route and exact keyset observation, commits all
-proof references atomically, and makes `(mint URL, Y)` unique across payments. It deliberately stores no
-secret, signature, DLEQ value, witness, memo, or raw payload. It is append-only and has no release,
-consumption, NUT-07, operator-effect, invoice-transition, journal, or HTTP-success behavior. `Y` remains
+proof references atomically, and makes each `(mint URL, Y)` active for at most one payment. It
+deliberately stores no secret, signature, DLEQ value, witness, memo, or raw payload. `Y` remains
 correlation-sensitive and is excluded from telemetry and merchant-facing responses.
 
 A separate bounded observer can send only reserved-style `Y` references to one configured mint's
@@ -178,9 +185,21 @@ NUT-07 endpoint and return an in-memory `UNSPENT`, `PENDING`, or `SPENT` snapsho
 response order and cardinality and discards any witness, but the query itself discloses the grouped
 references and timing to that mint. A separate PostgreSQL repository can persist the complete snapshot
 against the exact payment reservation, require explicit freshness bounds, and prevent state from
-regressing after `SPENT`. It stores no witness or bearer field and remains disconnected from reservation
-transitions. The evidence is an operator assertion that can become stale immediately and cannot
-establish payment, solvency, or a safe release after ambiguity.
+regressing after `SPENT`. It stores no witness or bearer field. The evidence is an operator assertion
+that can become stale immediately and cannot establish payment or solvency by itself.
+
+A lifecycle repository separately binds one immutable swap or melt effect and an append-only sequence
+of state changes. A canonical dispatch fingerprint prevents the same outbound operation from being
+attached to multiple local payments. Melt effects also bind a quote ID and expiry. Ambiguity enters
+`needs_attention` and retains active proof and invoice claims. Consumption requires matching success
+plus exact all-`SPENT` evidence. Post-dispatch release requires matching terminal failure plus exact
+all-`UNSPENT` evidence; melt release additionally requires the `UNPAID` outcome at or after quote
+expiry. Database triggers repeat these rules and require active projections to agree with history.
+
+The lifecycle stores only sanitized identities, outcomes, timestamps, and state-snapshot fingerprints.
+It does not authenticate the outcome source, compute the canonical dispatch bytes, hold or send bearer
+proofs, call a mint, mark an invoice paid, or write a journal. A future adapter must keep secrets,
+signatures, DLEQ values, witnesses, tokens, and raw responses out of lifecycle storage and telemetry.
 
 This is not authorization or a production data-protection program. The local Compose credentials are
 test-only. A deployed database requires encrypted transport and storage, least-privilege credentials,

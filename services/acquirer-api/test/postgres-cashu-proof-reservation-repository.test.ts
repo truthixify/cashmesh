@@ -64,6 +64,10 @@ describe.skipIf(DATABASE_URL === undefined)("PostgreSQL Cashu proof reservations
     try {
       await pool.query(`
         TRUNCATE
+          cashu_proof_reservation_events,
+          cashu_active_invoice_payment_claims,
+          cashu_operator_effects,
+          cashu_active_proof_claims,
           cashu_proof_state_observation_entries,
           cashu_proof_state_observations,
           cashu_reserved_proofs,

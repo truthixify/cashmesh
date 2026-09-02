@@ -78,9 +78,11 @@ The adapter pins a current release-candidate cashu-ts version behind this bounda
 
 The API exposes health, operator-policy evaluation, durable open-invoice plus strict NUT-18 request
 creation and lookup, and a non-accepting payment-envelope endpoint. Its storage adapters also persist
-append-only keyset evidence, local non-bearer proof-reference reservations, and payment-scoped NUT-07
-state evidence. Those adapters are not wired into the endpoint. Authentication, proof acceptance, and
-terminal invoice transitions are not yet implemented.
+append-only keyset evidence, local non-bearer proof-reference reservations, payment-scoped NUT-07 state
+evidence, and an append-only reservation lifecycle. The lifecycle binds one canonical dispatch
+fingerprint, preserves ambiguous effects, and requires matching exact proof-state evidence before
+consumption or release. These adapters are not wired into the endpoint. Bearer custody, operator
+dispatch, authentication, proof acceptance, and terminal invoice transitions are not yet implemented.
 
 ### Merchant Console
 
@@ -112,6 +114,24 @@ Preparation metadata is persisted while the public state remains `proofs_reserve
 ledger observation for that exact hash can terminate the obligation, but a timeout cannot. Once an
 external effect may exist, the adapter observes its remote state before deciding whether proofs can be
 released.
+
+The separate acquirer proof-reservation lifecycle is:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Reserved
+    Reserved --> Released: no dispatch started
+    Reserved --> DispatchStarted: persist exact effect intent
+    DispatchStarted --> Pending: melt pending
+    DispatchStarted --> NeedsAttention: ambiguous or invalid response
+    Pending --> NeedsAttention: outcome becomes ambiguous
+    DispatchStarted --> Consumed: matching success and all SPENT
+    Pending --> Consumed: melt paid and all SPENT
+    NeedsAttention --> Consumed: recovered success and all SPENT
+    DispatchStarted --> Released: terminal failure and all UNSPENT
+    Pending --> Released: expired unpaid melt and all UNSPENT
+    NeedsAttention --> Released: recovered terminal failure and all UNSPENT
+```
 
 ## Dependency Direction
 
@@ -183,15 +203,17 @@ require the invoice-creation reservation, invoice, request, and at least one acc
 together. A separate keyset repository preserves immutable identity across operators, records activity
 per observation, and retrieves only observations inside a caller-supplied freshness interval. The
 proof-reference repository binds an exact observation and issued operator route, then enforces one
-local claim per `(mint URL, Y)` across restarts and concurrent workers. The proof-state repository binds
-every complete observation to that exact reservation, preserves terminal `SPENT` history, and also
-requires a caller-supplied freshness interval. Repositories reconstruct stored records through validated
-adapters before return. See the [merchant invoice API](invoice-api.md) for request and replay semantics.
+active claim per `(mint URL, Y)` across restarts and concurrent workers. The proof-state repository
+binds every complete observation to that exact reservation, preserves terminal `SPENT` history, and
+also requires a caller-supplied freshness interval. The lifecycle repository stores immutable effect
+and transition evidence, keeps ambiguous claims active, and removes claims only for a proven release.
+Repositories reconstruct stored records through validated adapters before return. See the
+[merchant invoice API](invoice-api.md) for request and replay semantics.
 
-Later migrations must preserve the fixed invoice and recovery contracts and provide atomic transitions
-for:
+Later migrations must preserve the fixed invoice and recovery contracts and provide atomic
+transitions for:
 
-- proof-reservation lifecycle and terminal invoice state;
+- confirmed proof consumption, terminal invoice state, and the balanced merchant journal;
 - one idempotency key to one external payout attempt;
 - merchant ledger debit/credit pairs;
 - webhook delivery attempts; and
@@ -230,3 +252,4 @@ justify it.
 - [ADR-0013: Durable Cashu proof references](adr/0013-reserve-cashu-proof-references.md)
 - [ADR-0014: Bounded Cashu proof-state observation](adr/0014-observe-cashu-proof-state.md)
 - [ADR-0015: Durable Cashu proof-state evidence](adr/0015-persist-cashu-proof-state-evidence.md)
+- [ADR-0016: Cashu proof-reservation lifecycle](adr/0016-manage-cashu-proof-reservation-lifecycle.md)

@@ -868,6 +868,567 @@ const MIGRATIONS: readonly Migration[] = Object.freeze([
     `,
     version: 5,
   }),
+  Object.freeze({
+    name: "add_cashu_proof_reservation_lifecycle",
+    sql: `
+      ALTER TABLE cashu_proof_reservations
+        ADD CONSTRAINT cashu_proof_reservations_lifecycle_scope_unique
+        UNIQUE (payment_id, invoice_id, operator_id, mint_url);
+
+      ALTER TABLE cashu_reserved_proofs
+        ADD CONSTRAINT cashu_reserved_proofs_payment_mint_y_unique
+        UNIQUE (payment_id, mint_url, proof_y);
+
+      CREATE TABLE cashu_active_proof_claims (
+        mint_url VARCHAR(512) NOT NULL,
+        proof_y CHAR(66) NOT NULL,
+        payment_id VARCHAR(128) NOT NULL,
+        CONSTRAINT cashu_active_proof_claims_pkey PRIMARY KEY (mint_url, proof_y),
+        CONSTRAINT cashu_active_proof_claims_payment_y_unique UNIQUE (payment_id, proof_y),
+        CONSTRAINT cashu_active_proof_claims_reserved_proof_fkey
+          FOREIGN KEY (payment_id, mint_url, proof_y)
+          REFERENCES cashu_reserved_proofs (payment_id, mint_url, proof_y)
+          ON DELETE RESTRICT
+      );
+
+      INSERT INTO cashu_active_proof_claims (mint_url, proof_y, payment_id)
+      SELECT mint_url, proof_y, payment_id
+      FROM cashu_reserved_proofs;
+
+      ALTER TABLE cashu_reserved_proofs
+        DROP CONSTRAINT cashu_reserved_proofs_mint_y_unique;
+
+      CREATE FUNCTION cashmesh_claim_cashu_reserved_proof()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        INSERT INTO cashu_active_proof_claims (mint_url, proof_y, payment_id)
+        VALUES (NEW.mint_url, NEW.proof_y, NEW.payment_id);
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_reserved_proofs_claim_active
+        AFTER INSERT ON cashu_reserved_proofs
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_claim_cashu_reserved_proof();
+
+      CREATE TABLE cashu_operator_effects (
+        effect_id VARCHAR(128) PRIMARY KEY,
+        effect_fingerprint CHAR(64) NOT NULL UNIQUE,
+        dispatch_fingerprint CHAR(64) NOT NULL,
+        payment_id VARCHAR(128) NOT NULL UNIQUE,
+        invoice_id VARCHAR(128) NOT NULL,
+        operator_id VARCHAR(128) NOT NULL,
+        mint_url VARCHAR(512) NOT NULL,
+        effect_kind TEXT NOT NULL,
+        operator_reference VARCHAR(128),
+        operator_reference_expires_at BIGINT,
+        schema_version SMALLINT NOT NULL,
+        started_at BIGINT NOT NULL,
+        CONSTRAINT cashu_operator_effects_effect_payment_unique UNIQUE (effect_id, payment_id),
+        CONSTRAINT cashu_operator_effects_effect_payment_invoice_unique UNIQUE (
+          effect_id,
+          payment_id,
+          invoice_id
+        ),
+        CONSTRAINT cashu_operator_effects_remote_reference_unique UNIQUE (
+          mint_url,
+          effect_kind,
+          operator_reference
+        ),
+        CONSTRAINT cashu_operator_effects_dispatch_unique UNIQUE (
+          mint_url,
+          effect_kind,
+          dispatch_fingerprint
+        ),
+        CONSTRAINT cashu_operator_effects_id CHECK (
+          effect_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_operator_effects_fingerprint CHECK (
+          effect_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_operator_effects_dispatch_fingerprint CHECK (
+          dispatch_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_operator_effects_kind CHECK (effect_kind IN ('swap', 'melt')),
+        CONSTRAINT cashu_operator_effects_reference CHECK (
+          (
+            effect_kind = 'swap'
+            AND operator_reference IS NULL
+            AND operator_reference_expires_at IS NULL
+          )
+          OR (
+            effect_kind = 'melt'
+            AND operator_reference ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+            AND operator_reference_expires_at > started_at
+            AND operator_reference_expires_at <= 9007199254740991
+          )
+        ),
+        CONSTRAINT cashu_operator_effects_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_operator_effects_started_at CHECK (
+          started_at >= 0 AND started_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_operator_effects_reservation_fkey
+          FOREIGN KEY (payment_id, invoice_id, operator_id, mint_url)
+          REFERENCES cashu_proof_reservations (payment_id, invoice_id, operator_id, mint_url)
+          ON DELETE RESTRICT
+      );
+
+      CREATE TABLE cashu_active_invoice_payment_claims (
+        invoice_id VARCHAR(128) PRIMARY KEY,
+        payment_id VARCHAR(128) NOT NULL UNIQUE,
+        effect_id VARCHAR(128) NOT NULL UNIQUE,
+        CONSTRAINT cashu_active_invoice_payment_claims_effect_fkey
+          FOREIGN KEY (effect_id, payment_id, invoice_id)
+          REFERENCES cashu_operator_effects (effect_id, payment_id, invoice_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE FUNCTION cashmesh_claim_cashu_operator_effect_invoice()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        INSERT INTO cashu_active_invoice_payment_claims (invoice_id, payment_id, effect_id)
+        VALUES (NEW.invoice_id, NEW.payment_id, NEW.effect_id);
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_operator_effects_claim_invoice
+        AFTER INSERT ON cashu_operator_effects
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_claim_cashu_operator_effect_invoice();
+
+      CREATE TABLE cashu_proof_reservation_events (
+        event_id VARCHAR(128) PRIMARY KEY,
+        event_fingerprint CHAR(64) NOT NULL UNIQUE,
+        payment_id VARCHAR(128) NOT NULL,
+        sequence SMALLINT NOT NULL,
+        schema_version SMALLINT NOT NULL,
+        state TEXT NOT NULL,
+        recorded_at BIGINT NOT NULL,
+        effect_id VARCHAR(128),
+        evidence_kind TEXT,
+        evidence_at BIGINT,
+        proof_state_snapshot_fingerprint CHAR(64),
+        CONSTRAINT cashu_proof_reservation_events_payment_sequence_unique UNIQUE (
+          payment_id,
+          sequence
+        ),
+        CONSTRAINT cashu_proof_reservation_events_id CHECK (
+          event_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        ),
+        CONSTRAINT cashu_proof_reservation_events_fingerprint CHECK (
+          event_fingerprint ~ '^[0-9a-f]{64}$'
+        ),
+        CONSTRAINT cashu_proof_reservation_events_sequence CHECK (
+          sequence >= 0 AND sequence < 1024
+        ),
+        CONSTRAINT cashu_proof_reservation_events_schema CHECK (schema_version = 1),
+        CONSTRAINT cashu_proof_reservation_events_state CHECK (
+          state IN (
+            'dispatch_started',
+            'pending',
+            'needs_attention',
+            'consumed',
+            'released'
+          )
+        ),
+        CONSTRAINT cashu_proof_reservation_events_recorded_at CHECK (
+          recorded_at >= 0 AND recorded_at <= 9007199254740991
+        ),
+        CONSTRAINT cashu_proof_reservation_events_evidence_at CHECK (
+          evidence_at IS NULL
+          OR (evidence_at >= 0 AND evidence_at <= recorded_at)
+        ),
+        CONSTRAINT cashu_proof_reservation_events_shape CHECK (
+          (
+            state = 'dispatch_started'
+            AND effect_id IS NOT NULL
+            AND evidence_kind IS NULL
+            AND evidence_at IS NULL
+            AND proof_state_snapshot_fingerprint IS NULL
+          )
+          OR (
+            state = 'pending'
+            AND effect_id IS NOT NULL
+            AND evidence_kind = 'operator_pending'
+            AND evidence_at IS NOT NULL
+            AND proof_state_snapshot_fingerprint IS NULL
+          )
+          OR (
+            state = 'needs_attention'
+            AND effect_id IS NOT NULL
+            AND evidence_kind IN (
+              'transport_ambiguous',
+              'operator_state_unknown',
+              'operator_response_invalid'
+            )
+            AND evidence_at IS NOT NULL
+            AND proof_state_snapshot_fingerprint IS NULL
+          )
+          OR (
+            state = 'consumed'
+            AND effect_id IS NOT NULL
+            AND evidence_kind IN ('swap_succeeded', 'melt_paid')
+            AND evidence_at IS NOT NULL
+            AND proof_state_snapshot_fingerprint IS NOT NULL
+          )
+          OR (
+            state = 'released'
+            AND effect_id IS NULL
+            AND evidence_kind = 'pre_dispatch'
+            AND evidence_at IS NULL
+            AND proof_state_snapshot_fingerprint IS NULL
+          )
+          OR (
+            state = 'released'
+            AND effect_id IS NOT NULL
+            AND evidence_kind IN ('swap_rejected', 'melt_unpaid_after_expiry')
+            AND evidence_at IS NOT NULL
+            AND proof_state_snapshot_fingerprint IS NOT NULL
+          )
+        ),
+        CONSTRAINT cashu_proof_reservation_events_reservation_fkey
+          FOREIGN KEY (payment_id)
+          REFERENCES cashu_proof_reservations (payment_id)
+          ON DELETE RESTRICT,
+        CONSTRAINT cashu_proof_reservation_events_effect_fkey
+          FOREIGN KEY (effect_id, payment_id)
+          REFERENCES cashu_operator_effects (effect_id, payment_id)
+          ON DELETE RESTRICT,
+        CONSTRAINT cashu_proof_reservation_events_proof_state_fkey
+          FOREIGN KEY (proof_state_snapshot_fingerprint, payment_id)
+          REFERENCES cashu_proof_state_observations (snapshot_fingerprint, payment_id)
+          ON DELETE RESTRICT
+      );
+
+      CREATE INDEX cashu_proof_reservation_events_latest_idx
+        ON cashu_proof_reservation_events (payment_id, sequence DESC);
+
+      CREATE FUNCTION cashmesh_reject_cashu_reservation_lifecycle_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Cashu reservation lifecycle evidence is append-only'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER cashu_operator_effects_append_only
+        BEFORE UPDATE OR DELETE ON cashu_operator_effects
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_reservation_lifecycle_mutation();
+
+      CREATE TRIGGER cashu_proof_reservation_events_append_only
+        BEFORE UPDATE OR DELETE ON cashu_proof_reservation_events
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_reservation_lifecycle_mutation();
+
+      CREATE FUNCTION cashmesh_reject_cashu_active_claim_update()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'Cashu active claims cannot be updated'
+          USING ERRCODE = 'object_not_in_prerequisite_state';
+      END
+      $$;
+
+      CREATE TRIGGER cashu_active_proof_claims_no_update
+        BEFORE UPDATE ON cashu_active_proof_claims
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_active_claim_update();
+
+      CREATE TRIGGER cashu_active_invoice_payment_claims_no_update
+        BEFORE UPDATE ON cashu_active_invoice_payment_claims
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_reject_cashu_active_claim_update();
+
+      CREATE FUNCTION cashmesh_validate_cashu_reservation_event()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        effect_record cashu_operator_effects%ROWTYPE;
+        invoice_record merchant_invoices%ROWTYPE;
+        matching_state_count INTEGER;
+        observation_record cashu_proof_state_observations%ROWTYPE;
+        previous_event cashu_proof_reservation_events%ROWTYPE;
+        reservation_record cashu_proof_reservations%ROWTYPE;
+        state_entry_count INTEGER;
+      BEGIN
+        SELECT * INTO reservation_record
+        FROM cashu_proof_reservations
+        WHERE payment_id = NEW.payment_id
+        FOR UPDATE;
+
+        IF NOT FOUND OR NEW.recorded_at < reservation_record.reserved_at THEN
+          RAISE EXCEPTION 'Cashu reservation event requires its reservation time boundary'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        SELECT * INTO previous_event
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = NEW.payment_id
+        ORDER BY sequence DESC
+        LIMIT 1;
+
+        IF FOUND THEN
+          IF NEW.sequence <> previous_event.sequence + 1
+            OR NEW.recorded_at < previous_event.recorded_at
+            OR previous_event.state IN ('consumed', 'released')
+            OR NEW.state = 'dispatch_started'
+            OR NEW.effect_id IS DISTINCT FROM previous_event.effect_id
+            OR NEW.state NOT IN ('pending', 'needs_attention', 'consumed', 'released')
+          THEN
+            RAISE EXCEPTION 'Cashu reservation lifecycle transition is invalid'
+              USING ERRCODE = 'check_violation';
+          END IF;
+        ELSE
+          IF NEW.sequence <> 0
+            OR NEW.state NOT IN ('dispatch_started', 'released')
+            OR (NEW.state = 'released' AND NEW.evidence_kind <> 'pre_dispatch')
+          THEN
+            RAISE EXCEPTION 'Cashu reservation lifecycle must begin at dispatch or release'
+              USING ERRCODE = 'check_violation';
+          END IF;
+        END IF;
+
+        IF NEW.effect_id IS NOT NULL THEN
+          SELECT * INTO effect_record
+          FROM cashu_operator_effects
+          WHERE effect_id = NEW.effect_id
+            AND payment_id = NEW.payment_id;
+
+          IF NOT FOUND
+            OR effect_record.started_at > NEW.recorded_at
+            OR (
+              NEW.evidence_at IS NOT NULL
+              AND NEW.evidence_at < effect_record.started_at
+            )
+          THEN
+            RAISE EXCEPTION 'Cashu reservation event does not match its operator effect'
+              USING ERRCODE = 'check_violation';
+          END IF;
+
+          IF NEW.state = 'dispatch_started' THEN
+            SELECT * INTO invoice_record
+            FROM merchant_invoices
+            WHERE id = reservation_record.invoice_id;
+
+            IF effect_record.started_at <> NEW.recorded_at
+              OR NOT FOUND
+              OR invoice_record.state <> 'open'
+              OR effect_record.started_at < invoice_record.created_at
+              OR effect_record.started_at >= invoice_record.expires_at
+            THEN
+              RAISE EXCEPTION 'Cashu operator effect requires an open invoice window'
+                USING ERRCODE = 'check_violation';
+            END IF;
+          END IF;
+
+          IF (NEW.evidence_kind = 'swap_succeeded' AND effect_record.effect_kind <> 'swap')
+            OR (NEW.evidence_kind = 'melt_paid' AND effect_record.effect_kind <> 'melt')
+            OR (NEW.evidence_kind = 'swap_rejected' AND effect_record.effect_kind <> 'swap')
+            OR (
+              NEW.evidence_kind = 'melt_unpaid_after_expiry'
+              AND (
+                effect_record.effect_kind <> 'melt'
+                OR NEW.evidence_at < effect_record.operator_reference_expires_at
+              )
+            )
+            OR (NEW.evidence_kind = 'operator_pending' AND effect_record.effect_kind <> 'melt')
+          THEN
+            RAISE EXCEPTION 'Cashu operator evidence does not match the effect kind'
+              USING ERRCODE = 'check_violation';
+          END IF;
+        END IF;
+
+        IF NEW.proof_state_snapshot_fingerprint IS NOT NULL THEN
+          SELECT * INTO observation_record
+          FROM cashu_proof_state_observations
+          WHERE snapshot_fingerprint = NEW.proof_state_snapshot_fingerprint
+            AND payment_id = NEW.payment_id;
+
+          IF NOT FOUND
+            OR observation_record.observed_at < NEW.evidence_at
+            OR observation_record.observed_at > NEW.recorded_at
+          THEN
+            RAISE EXCEPTION 'Cashu terminal lifecycle event lacks ordered proof-state evidence'
+              USING ERRCODE = 'check_violation';
+          END IF;
+
+          SELECT
+            COUNT(*),
+            COUNT(*) FILTER (
+              WHERE state = CASE WHEN NEW.state = 'consumed' THEN 'SPENT' ELSE 'UNSPENT' END
+            )
+            INTO state_entry_count, matching_state_count
+          FROM cashu_proof_state_observation_entries
+          WHERE snapshot_fingerprint = NEW.proof_state_snapshot_fingerprint;
+
+          IF state_entry_count = 0 OR matching_state_count <> state_entry_count THEN
+            RAISE EXCEPTION 'Cashu terminal lifecycle event requires one uniform proof state'
+              USING ERRCODE = 'check_violation';
+          END IF;
+        END IF;
+
+        RETURN NEW;
+      END
+      $$;
+
+      CREATE TRIGGER cashu_proof_reservation_events_validate
+        BEFORE INSERT ON cashu_proof_reservation_events
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_reservation_event();
+
+      CREATE FUNCTION cashmesh_require_cashu_operator_effect_event()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM cashu_proof_reservation_events
+          WHERE payment_id = NEW.payment_id
+            AND sequence = 0
+            AND state = 'dispatch_started'
+            AND effect_id = NEW.effect_id
+            AND recorded_at = NEW.started_at
+        ) THEN
+          RAISE EXCEPTION 'Cashu operator effect requires a matching dispatch event'
+            USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER cashu_operator_effects_event_required
+        AFTER INSERT ON cashu_operator_effects
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_require_cashu_operator_effect_event();
+
+      CREATE FUNCTION cashmesh_validate_cashu_active_claims()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        active_invoice_count INTEGER;
+        active_proof_count INTEGER;
+        effect_exists BOOLEAN;
+        effect_record cashu_operator_effects%ROWTYPE;
+        expected_proof_count INTEGER;
+        latest_state TEXT;
+        reservation_payment_id VARCHAR(128);
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          reservation_payment_id := OLD.payment_id;
+        ELSE
+          reservation_payment_id := NEW.payment_id;
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM cashu_proof_reservations WHERE payment_id = reservation_payment_id
+        ) THEN
+          RETURN NULL;
+        END IF;
+
+        SELECT state INTO latest_state
+        FROM cashu_proof_reservation_events
+        WHERE payment_id = reservation_payment_id
+        ORDER BY sequence DESC
+        LIMIT 1;
+        latest_state := COALESCE(latest_state, 'reserved');
+
+        SELECT COUNT(*) INTO expected_proof_count
+        FROM cashu_reserved_proofs
+        WHERE payment_id = reservation_payment_id;
+
+        SELECT COUNT(*) INTO active_proof_count
+        FROM cashu_active_proof_claims AS claim
+        JOIN cashu_reserved_proofs AS proof
+          ON proof.payment_id = claim.payment_id
+          AND proof.mint_url = claim.mint_url
+          AND proof.proof_y = claim.proof_y
+        WHERE claim.payment_id = reservation_payment_id;
+
+        IF (latest_state = 'released' AND active_proof_count <> 0)
+          OR (
+            latest_state <> 'released'
+            AND active_proof_count <> expected_proof_count
+          )
+        THEN
+          RAISE EXCEPTION 'Cashu active proof claims do not match lifecycle state'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        SELECT * INTO effect_record
+        FROM cashu_operator_effects
+        WHERE payment_id = reservation_payment_id;
+        effect_exists := FOUND;
+
+        SELECT COUNT(*) INTO active_invoice_count
+        FROM cashu_active_invoice_payment_claims
+        WHERE payment_id = reservation_payment_id;
+
+        IF (latest_state = 'released' AND active_invoice_count <> 0)
+          OR (
+            latest_state <> 'released'
+            AND effect_exists
+            AND active_invoice_count <> 1
+          )
+          OR (
+            latest_state <> 'released'
+            AND NOT effect_exists
+            AND active_invoice_count <> 0
+          )
+        THEN
+          RAISE EXCEPTION 'Cashu active invoice claim does not match lifecycle state'
+            USING ERRCODE = 'check_violation';
+        END IF;
+
+        RETURN NULL;
+      END
+      $$;
+
+      CREATE CONSTRAINT TRIGGER cashu_active_proof_claims_valid
+        AFTER INSERT OR UPDATE OR DELETE ON cashu_active_proof_claims
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_active_claims();
+
+      CREATE CONSTRAINT TRIGGER cashu_active_invoice_payment_claims_valid
+        AFTER INSERT OR UPDATE OR DELETE ON cashu_active_invoice_payment_claims
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_active_claims();
+
+      CREATE CONSTRAINT TRIGGER cashu_operator_effects_active_claims_valid
+        AFTER INSERT ON cashu_operator_effects
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_active_claims();
+
+      CREATE CONSTRAINT TRIGGER cashu_proof_reservation_events_active_claims_valid
+        AFTER INSERT ON cashu_proof_reservation_events
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_active_claims();
+
+      CREATE CONSTRAINT TRIGGER cashu_reserved_proofs_active_claims_valid
+        AFTER INSERT OR UPDATE OR DELETE ON cashu_reserved_proofs
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW
+        EXECUTE FUNCTION cashmesh_validate_cashu_active_claims();
+    `,
+    version: 6,
+  }),
 ]);
 
 export async function applyPostgresMigrations(client: PoolClient): Promise<void> {

@@ -52,6 +52,11 @@ interface ObservedKeysetRow extends QueryResultRow {
   readonly keyset_id: string;
 }
 
+interface LifecycleReplayRow extends QueryResultRow {
+  readonly active_claims: string;
+  readonly latest_state: string | null;
+}
+
 interface PostgresErrorShape {
   readonly code?: unknown;
   readonly constraint?: unknown;
@@ -307,6 +312,37 @@ export class PostgresCashuProofReservationRepository implements CashuProofReserv
       );
     }
     const reservation = await this.mapReservation(client, row);
+    const lifecycle = await client.query<LifecycleReplayRow>(
+      `
+        SELECT
+          (
+            SELECT state
+            FROM cashu_proof_reservation_events
+            WHERE payment_id = $1
+            ORDER BY sequence DESC
+            LIMIT 1
+          ) AS latest_state,
+          (
+            SELECT COUNT(*)
+            FROM cashu_active_proof_claims
+            WHERE payment_id = $1
+          ) AS active_claims
+      `,
+      [reservation.paymentId],
+    );
+    const lifecycleRow = lifecycle.rows[0];
+    if (lifecycleRow?.latest_state === "released") {
+      throw new CashuProofReservationRepositoryError(
+        "reservation_released",
+        "Released Cashu proof reservations cannot be reactivated by replay.",
+      );
+    }
+    if (
+      lifecycleRow === undefined ||
+      parseSafeInteger(lifecycleRow.active_claims) !== reservation.proofReferences.length
+    ) {
+      return failInvalidRecord();
+    }
     return Object.freeze({ replayed: true, reservation });
   }
 
@@ -579,7 +615,7 @@ function mapStorageError(error: unknown): CashuProofReservationRepositoryError {
   const databaseError = error as PostgresErrorShape;
   if (
     databaseError.code === "23505" &&
-    databaseError.constraint === "cashu_reserved_proofs_mint_y_unique"
+    databaseError.constraint === "cashu_active_proof_claims_pkey"
   ) {
     return new CashuProofReservationRepositoryError(
       "proof_conflict",

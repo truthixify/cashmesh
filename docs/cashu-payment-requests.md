@@ -2,8 +2,8 @@
 
 **Status:** Strict request construction, durable issuance, non-accepting HTTP envelope intake, offline
 proof-integrity validation, bounded public-key and proof-state observation, durable keyset and
-proof-state evidence, and local proof-reference reservation implemented; operator effects and payment
-acceptance not implemented
+proof-state evidence, local proof-reference reservation, and durable reservation lifecycle implemented;
+bearer custody, operator dispatch, and payment acceptance not implemented
 
 CashMesh constructs NUT-18 payment requests for an open merchant invoice and an explicit set of
 merchant-approved Cashu operators. The adapter is isolated in `packages/cashu`; the domain package
@@ -166,15 +166,17 @@ the exact keyset observation time, and a sorted set of proof references. Every r
 occur in that operator observation. The caller remains responsible for selecting the observation through
 an explicit freshness policy; the reservation does not infer one.
 
-PostgreSQL permits only one reservation for a `(mint URL, Y)` pair. Exact payment retries replay the
+PostgreSQL permits only one active claim for a `(mint URL, Y)` pair. Exact payment retries replay the
 stored record, changed terms under one payment ID fail, and competing payments cannot claim the same
-proof reference. The header and all references commit together, remain append-only across restart, and
-contain no secret, signature, DLEQ value, witness, memo, or raw payload.
+proof reference. A released reservation cannot be reactivated by replay, although a new payment may
+claim the same references after their active claims are removed. The header and all references commit
+together, remain append-only across restart, and contain no secret, signature, DLEQ value, witness,
+memo, or raw payload.
 
-This is a sticky local lock, not a payment state. It has no release or consumption transition, does not
-call an operator, does not retain spendable proof material, and cannot change an invoice or enable HTTP
-success. `Y` is non-spendable but correlation-sensitive and must not enter logs, metrics, support
-artifacts, or merchant responses.
+Reservation creation is a local lock, not payment acceptance. A separate lifecycle controls whether
+that lock remains active, is consumed, or is safely released. Neither repository calls an operator,
+retains spendable proof material, changes an invoice, or enables HTTP success. `Y` is non-spendable but
+correlation-sensitive and must not enter logs, metrics, support artifacts, or merchant responses.
 
 ## Proof-State Observation
 
@@ -203,7 +205,32 @@ freshness bounds select the latest acceptable observation.
 `UNSPENT` and `PENDING` can move between each other until a proof becomes `SPENT`. `SPENT` is terminal
 even when evidence is backfilled out of order. PostgreSQL repeats exact proof-set coverage and terminal
 history constraints below the repository. The store remains append-only, unscheduled, non-accepting,
-and witness-free; it does not interpret a snapshot as payment or change the sticky reservation.
+and witness-free; it does not interpret a snapshot as payment by itself.
+
+## Proof-Reservation Lifecycle
+
+The acquirer can persist one exact operator effect intent for a reserved payment. A swap or melt effect
+binds a local effect ID, start time, and SHA-256 fingerprint of the future adapter's canonical outbound
+operation. A melt additionally binds its NUT-05 quote ID and expiry. Immutable events reconstruct
+`dispatch_started`, melt-only `pending`, `needs_attention`, `consumed`, or `released` state across
+restart. One active invoice claim and one dispatch binding prevent competing local effects.
+
+A pre-dispatch reservation may be released without mint evidence. After dispatch starts, ambiguity
+always retains the invoice and proof claims. Matching swap success or melt `PAID` evidence consumes
+only with a persisted exact all-`SPENT` NUT-07 snapshot at or after that outcome. A definite swap
+rejection releases only with later exact all-`UNSPENT` evidence. A melt requires both an `UNPAID`
+outcome at or after the bound quote expiry and later exact all-`UNSPENT` evidence. Mixed state,
+`PENDING`, timeout, and pre-expiry `UNPAID` never authorize release.
+
+Released reservations retain immutable history while dropping active claims transactionally, allowing
+a new payment to claim proofs that are still provably unspent. Consumed and ambiguous lifecycles retain
+their claims. Exact event retries replay; conflicting identities or evidence fail. PostgreSQL repeats
+the transition, ordering, effect-kind, proof-state, dispatch-ownership, and active-projection rules
+below the repository.
+
+This boundary stores sanitized effect evidence, not a trusted receipt. It does not compute the
+canonical dispatch fingerprint, authenticate a mint response, retain bearer proofs, send NUT-03 or
+NUT-05 requests, transition an invoice, write accounting, or change the public endpoint's rejection.
 
 A complete request reveals the invoice identifier, amount, accepted mint URLs, and acquirer endpoint.
 It is bearer-adjacent payment metadata and must be redacted from logs, traces, analytics, screenshots,
@@ -225,15 +252,18 @@ and proof-state observer tests cover stable metadata, exact request/response bin
 concurrency, response bounds, transport timeouts, and failure paths entirely through local fixtures.
 PostgreSQL tests cover restart, historical collision rejection, freshness bounds, exact keyset and
 proof-state binding, terminal state history, concurrent replay, proof-reference exclusion, append-only
-enforcement, rollback, and stored-record corruption. They do not prove endpoint authenticity, an
-appropriate production freshness policy, mint honesty, redemption, or merchant settlement. Do not
-present a locally issued fixture request as payable.
+enforcement, reservation lifecycle recovery, dispatch ownership, ambiguity retention, evidence-gated
+release, rollback, and stored-record corruption. They do not prove endpoint authenticity, an
+appropriate production freshness policy, mint honesty, operator dispatch, redemption, or merchant
+settlement. Do not present a locally issued fixture request as payable.
 
 ## References
 
 - [Cashu NUT-18 payment requests](https://github.com/cashubtc/nuts/blob/main/18.md)
 - [Cashu NUT-01 mint public keys](https://github.com/cashubtc/nuts/blob/main/01.md)
 - [Cashu NUT-02 keysets and fees](https://github.com/cashubtc/nuts/blob/main/02.md)
+- [Cashu NUT-03 swap](https://github.com/cashubtc/nuts/blob/main/03.md)
+- [Cashu NUT-05 melt](https://github.com/cashubtc/nuts/blob/main/05.md)
 - [Cashu NUT-07 proof state](https://github.com/cashubtc/nuts/blob/main/07.md)
 - [Cashu NUT-12 DLEQ proofs](https://github.com/cashubtc/nuts/blob/main/12.md)
 - [Cashu NUT-21 clear authentication](https://github.com/cashubtc/nuts/blob/main/21.md)
